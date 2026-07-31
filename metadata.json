@@ -1,0 +1,6 @@
+{
+  "name": "Controle de Caixa Inteligente",
+  "description": "Um organizador financeiro de fluxo de caixa multicaixas, com gráficos dinâmicos de categoria e insights inteligentes gerados via IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
