@@ -36,22 +36,35 @@ import {
   Cloud,
   CloudOff,
   Database,
-  Key
+  Key,
+  CreditCard as CreditCardIcon,
+  Receipt,
+  CheckCircle2,
+  ShieldCheck,
+  SlidersHorizontal
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { LeadpageDashboard } from "./components/LeadpageDashboard";
 import { CategoriesManager } from "./components/CategoriesManager";
+import { CategoryBulkTransferModal } from "./components/CategoryBulkTransferModal";
+import { CategorySelectionModal } from "./components/CategorySelectionModal";
+import { resolveCategoryColorHex } from "./utils/categoryColor";
 import { ActivityLogPanel, ActivityLog } from "./components/ActivityLogPanel";
 import { ExecutiveReportModal } from "./components/ExecutiveReportModal";
 import { RentalReportModal } from "./components/RentalReportModal";
 import { AccountantReportModal } from "./components/AccountantReportModal";
 import { DepositDetailModal, calculateMonthsDifference } from "./components/DepositDetailModal";
+import { CreditCardsManager, CreditCard as CreditCardData, PaymentMethod } from "./components/CreditCardsManager";
+import { AppUpdateModal, AppUpdateInfo } from "./components/AppUpdateModal";
 
 // Interfaces
 interface Caixa {
   id: string;
   name: string;
 }
+
+export type { PaymentMethod };
+export type CreditCard = CreditCardData;
 
 interface Transaction {
   id: string;
@@ -61,6 +74,10 @@ interface Transaction {
   amount: number;
   type: "entrada" | "saida";
   category: string;
+  paymentMethod?: PaymentMethod;
+  cardId?: string;
+  fixedTemplateId?: string;
+  installments?: { current: number; total: number };
 }
 
 interface Category {
@@ -106,9 +123,36 @@ interface RentalProperty {
   depositStartDate?: string;
   depositInterestRate?: number;
   depositCorrectionMode?: "fixed" | "bcb";
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: RentalItemAdjustment[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
 }
 
-interface RentalPaymentAdjustment {
+export interface RentalItemAdjustment {
+  id: string;
+  mode: "add" | "subtract";
+  amount: number;
+  description: string;
+  recurrence: "fixo" | "pontual";
+  targetPeriod?: string; // "YYYY-MM"
+  createdAt?: string;
+}
+
+export interface RentalPaymentPart {
+  id: string;
+  amount: number;
+  date: string;
+  paymentMethod: string;
+  observation?: string;
+  txId?: string;
+}
+
+export interface RentalPaymentAdjustment {
   period: string;
   expectedAmount: number;
   receivedAmount: number;
@@ -122,7 +166,25 @@ interface RentalPaymentAdjustment {
   lateFeeStatus: "none" | "suggested" | "waived" | "charged";
   createdAt: string;
   note?: string;
+  paymentMethod?: string;
+  observation?: string;
+  parts?: RentalPaymentPart[];
 }
+
+export const RENTAL_PAYMENT_METHODS = [
+  { id: "dinheiro", label: "Dinheiro / Espécie", icon: "💵" },
+  { id: "pix", label: "PIX", icon: "⚡" },
+  { id: "transferencia", label: "Transferência / TED", icon: "🏦" },
+  { id: "cartao_debito", label: "Cartão de Débito", icon: "💳" },
+  { id: "cartao_credito", label: "Cartão de Crédito", icon: "💳" },
+  { id: "boleto", label: "Boleto Bancário", icon: "📄" },
+  { id: "outro", label: "Outro", icon: "🔄" }
+];
+
+export const getRentalPaymentMethodLabel = (id?: string) => {
+  const found = RENTAL_PAYMENT_METHODS.find(m => m.id === id);
+  return found ? `${found.icon} ${found.label}` : id || "Dinheiro";
+};
 
 const getLocalDateInputValue = (date = new Date()) => {
   const year = date.getFullYear();
@@ -173,8 +235,37 @@ const addDaysToDateInput = (dateStr: string, days: number) => {
   return getLocalDateInputValue(date);
 };
 
-const getRentalExpectedAmount = (rental: RentalProperty) => {
-  return rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+export const getRentalApplicableAdjustments = (rental: RentalProperty, period?: string): RentalItemAdjustment[] => {
+  const result: RentalItemAdjustment[] = [];
+  if (rental.adjustments && Array.isArray(rental.adjustments)) {
+    rental.adjustments.forEach(adj => {
+      if (adj.recurrence === "fixo") {
+        result.push(adj);
+      } else if (!period || adj.targetPeriod === period) {
+        result.push(adj);
+      }
+    });
+  } else if (rental.adjustmentAmount && rental.adjustmentAmount > 0) {
+    result.push({
+      id: "legacy-adj-" + rental.id,
+      mode: rental.adjustmentMode || "add",
+      amount: rental.adjustmentAmount,
+      description: rental.adjustmentReason || "Ajuste de valor",
+      recurrence: "fixo"
+    });
+  }
+  return result;
+};
+
+export const getRentalAdjustmentsNetTotal = (rental: RentalProperty, period?: string): number => {
+  const adjs = getRentalApplicableAdjustments(rental, period);
+  return adjs.reduce((sum, a) => a.mode === "subtract" ? sum - a.amount : sum + a.amount, 0);
+};
+
+const getRentalExpectedAmount = (rental: RentalProperty, period?: string) => {
+  const base = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+  const netAdj = getRentalAdjustmentsNetTotal(rental, period);
+  return base + netAdj;
 };
 
 const getPendingRentalCarryover = (rental: RentalProperty, currentPeriod?: string) => {
@@ -287,217 +378,952 @@ const INITIAL_CAIXAS: Caixa[] = [
   { id: "contratos_de_aluguel", name: "Contratos de Aluguel" }
 ];
 
-const INITIAL_TRANSACTIONS = (): Transaction[] => {
+export const INITIAL_RENTALS = (): RentalProperty[] => {
   return [
-    // --- MAIO 2026 (Mês Ativo) ---
     {
-      id: "seed-may-1",
-      caixaId: "principal",
-      date: "2026-05-01",
-      description: "Recebimento Salário CLT",
-      amount: 6200.00,
-      type: "entrada",
-      category: "Salário"
+      id: "rent-lf01",
+      caixaId: "contratos_de_aluguel",
+      lfCode: "LF01",
+      tenantName: "Carlos Eduardo Silva",
+      address: "Rua das Flores, 142 - Apto 302, Centro",
+      dueDay: 5,
+      rentAmount: 2200.00,
+      waterAmount: 85.00,
+      iptuAmount: 120.00,
+      garbageAmount: 35.00,
+      lightAmount: 0,
+      fineAmount: 0,
+      adminFeePercent: 10,
+      adminFeeAmount: 220.00,
+      hasDeposit: true,
+      depositMonthsCount: 3,
+      depositAmount: 6600.00,
+      depositStartDate: "2025-01-10",
+      depositInterestRate: 0.5,
+      guaranteeType: "caucao",
+      paidPeriods: ["2026-07", "2026-08", "2026-09", "2026-10"],
+      paymentDates: {
+        "2026-07": "2026-07-05",
+        "2026-08": "2026-08-05",
+        "2026-09": "2026-09-05",
+        "2026-10": "2026-10-04"
+      },
+      paymentAmounts: {
+        "2026-07": 2220.00,
+        "2026-08": 2220.00,
+        "2026-09": 2220.00,
+        "2026-10": 2220.00
+      },
+      paymentAdjustments: {
+        "2026-10": {
+          period: "2026-10",
+          expectedAmount: 2220.00,
+          receivedAmount: 2220.00,
+          difference: 0,
+          status: "charged",
+          dueDate: "2026-10-05",
+          graceDate: "2026-10-07",
+          receivedDate: "2026-10-04",
+          daysAfterDue: -1,
+          daysAfterGrace: -3,
+          lateFeeStatus: "none",
+          createdAt: "2026-10-04T10:30:00.000Z",
+          paymentMethod: "pix",
+          observation: "Pagamento pontual via Chave PIX",
+          parts: [
+            {
+              id: "part-lf01-10",
+              amount: 2220.00,
+              date: "2026-10-04",
+              paymentMethod: "pix",
+              observation: "Recebido integralmente via PIX",
+              txId: "tx-rent-rent-lf01-2026-10"
+            }
+          ]
+        }
+      }
     },
     {
-      id: "seed-may-2",
-      caixaId: "principal",
-      date: "2026-05-05",
-      description: "Venda de Licenças SaaS",
-      amount: 5900.00,
-      type: "entrada",
-      category: "Vendas"
+      id: "rent-lf02",
+      caixaId: "contratos_de_aluguel",
+      lfCode: "LF02",
+      tenantName: "Mariana Souza e Lima",
+      address: "Av. dos Ipês, 880 - Casa 04, Residencial Jardins",
+      dueDay: 10,
+      rentAmount: 3500.00,
+      waterAmount: 110.00,
+      iptuAmount: 250.00,
+      garbageAmount: 40.00,
+      lightAmount: 240.00,
+      fineAmount: 0,
+      adminFeePercent: 10,
+      adminFeeAmount: 350.00,
+      hasDeposit: true,
+      depositMonthsCount: 3,
+      depositAmount: 10500.00,
+      depositStartDate: "2025-06-15",
+      depositInterestRate: 0.55,
+      guaranteeType: "caucao",
+      paidPeriods: ["2026-07", "2026-08", "2026-09", "2026-10"],
+      paymentDates: {
+        "2026-07": "2026-07-10",
+        "2026-08": "2026-08-10",
+        "2026-09": "2026-09-10",
+        "2026-10": "2026-10-12"
+      },
+      paymentAmounts: {
+        "2026-07": 3790.00,
+        "2026-08": 3790.00,
+        "2026-09": 3790.00,
+        "2026-10": 3790.00
+      },
+      paymentAdjustments: {
+        "2026-10": {
+          period: "2026-10",
+          expectedAmount: 3790.00,
+          receivedAmount: 3790.00,
+          difference: 0,
+          status: "charged",
+          dueDate: "2026-10-10",
+          graceDate: "2026-10-12",
+          receivedDate: "2026-10-10",
+          daysAfterDue: 0,
+          daysAfterGrace: -2,
+          lateFeeStatus: "none",
+          createdAt: "2026-10-10T14:15:00.000Z",
+          paymentMethod: "dinheiro",
+          observation: "1ª Parte em dinheiro no dia 10 e 2ª parte em TED no dia 12",
+          parts: [
+            {
+              id: "part-lf02-10-1",
+              amount: 2000.00,
+              date: "2026-10-10",
+              paymentMethod: "dinheiro",
+              observation: "1ª parcela paga em mãos em espécie",
+              txId: "tx-rent-rent-lf02-2026-10-part1"
+            },
+            {
+              id: "part-lf02-10-2",
+              amount: 1790.00,
+              date: "2026-10-12",
+              paymentMethod: "transferencia",
+              observation: "2ª parcela transferida via TED Banco do Brasil",
+              txId: "tx-rent-rent-lf02-2026-10-part2"
+            }
+          ]
+        }
+      }
     },
     {
-      id: "seed-may-3",
-      caixaId: "principal",
-      date: "2026-05-12",
-      description: "Serviço de Consultoria Dev Extra",
-      amount: 2500.00,
-      type: "entrada",
-      category: "Serviços"
+      id: "rent-lf03",
+      caixaId: "contratos_de_aluguel",
+      lfCode: "LF03",
+      tenantName: "TechNova Soluções Digitais Ltda",
+      address: "Av. Paulista, 1500 - Conjunto 405, Bela Vista",
+      dueDay: 15,
+      rentAmount: 2800.00,
+      waterAmount: 0,
+      iptuAmount: 320.00,
+      garbageAmount: 50.00,
+      lightAmount: 0,
+      fineAmount: 0,
+      adminFeePercent: 8,
+      adminFeeAmount: 224.00,
+      guaranteeType: "fiador",
+      guarantorName: "Dr. Roberto Mendes",
+      guarantorPhone: "(11) 98765-4321",
+      guarantorCpf: "123.456.789-00",
+      paidPeriods: ["2026-07", "2026-08", "2026-09"],
+      paymentDates: {
+        "2026-07": "2026-07-15",
+        "2026-08": "2026-08-15",
+        "2026-09": "2026-09-15"
+      },
+      paymentAmounts: {
+        "2026-07": 2946.00,
+        "2026-08": 2946.00,
+        "2026-09": 2946.00
+      }
     },
     {
-      id: "seed-may-4",
-      caixaId: "principal",
-      date: "2026-05-15",
-      description: "Aluguéis Recebidos - Casa Sol",
-      amount: 1850.00,
-      type: "entrada",
-      category: "Aluguéis Ativos"
-    },
+      id: "rent-lf04",
+      caixaId: "contratos_de_aluguel",
+      lfCode: "LF04",
+      tenantName: "Lucas Gabriel Ferreira",
+      address: "Rua Universitária, 55 - Kitnet 12",
+      dueDay: 20,
+      rentAmount: 1350.00,
+      waterAmount: 45.00,
+      iptuAmount: 65.00,
+      garbageAmount: 20.00,
+      lightAmount: 90.00,
+      fineAmount: 0,
+      adminFeePercent: 10,
+      adminFeeAmount: 135.00,
+      guaranteeType: "fiador",
+      guarantorName: "Sônia Maria Ferreira",
+      guarantorPhone: "(11) 97123-8899",
+      guarantorCpf: "987.654.321-11",
+      paidPeriods: ["2026-07", "2026-08", "2026-09"],
+      paymentDates: {
+        "2026-07": "2026-07-20",
+        "2026-08": "2026-08-20",
+        "2026-09": "2026-09-20"
+      },
+      paymentAmounts: {
+        "2026-07": 1435.00,
+        "2026-08": 1435.00,
+        "2026-09": 1435.00
+      }
+    }
+  ];
+};
+
+export const INITIAL_FIXED_TEMPLATES = (): FixedTemplate[] => {
+  return [
     {
-      id: "seed-may-5",
+      id: "tpl-demo-1",
       caixaId: "principal",
-      date: "2026-05-25",
-      description: "Rendimento de Dividendos FIIs",
-      amount: 480.00,
-      type: "entrada",
-      category: "Investimentos"
-    },
-    {
-      id: "seed-may-6",
-      caixaId: "principal",
-      date: "2026-05-05",
-      description: "Servidores Cloud Ingress Vercel",
-      amount: 580.00,
+      description: "Internet Fibra Dedicada 600MB",
+      amount: 189.90,
       type: "saida",
-      category: "Serviços Contratados"
+      category: "Serviços Contratados",
+      dueDay: 10,
+      status: "ativo"
     },
     {
-      id: "seed-may-7",
+      id: "tpl-demo-2",
       caixaId: "principal",
-      date: "2026-05-10",
-      description: "Supermercado Pão de Açúcar",
+      description: "Energia Elétrica Sede / Copel",
+      amount: 340.00,
+      type: "saida",
+      category: "Contas de Consumo (Luz/Água)",
+      dueDay: 18,
+      status: "ativo"
+    },
+    {
+      id: "tpl-demo-3",
+      caixaId: "principal",
+      description: "Condomínio Edifício Office Tower",
       amount: 720.00,
       type: "saida",
-      category: "Alimentação"
+      category: "Moradia (Aluguel/IPTU)",
+      dueDay: 10,
+      status: "ativo"
     },
     {
-      id: "seed-may-8",
+      id: "tpl-demo-4",
       caixaId: "principal",
-      date: "2026-05-11",
-      description: "Aluguel Apartamento",
-      amount: 2100.00,
+      description: "Honorários Contábeis e Fiscais",
+      amount: 850.00,
       type: "saida",
-      category: "Moradia (Aluguel/IPTU)"
+      category: "Serviços Contratados",
+      dueDay: 15,
+      status: "ativo"
     },
     {
-      id: "seed-may-9",
+      id: "tpl-demo-5",
       caixaId: "principal",
-      date: "2026-05-15",
-      description: "Uber / Combustível Premium",
-      amount: 410.00,
+      description: "Plano de Saúde Executivo Unimed",
+      amount: 1150.00,
       type: "saida",
-      category: "Transporte"
+      category: "Saúde",
+      dueDay: 22,
+      status: "ativo"
     },
     {
-      id: "seed-may-10",
+      id: "tpl-demo-6",
       caixaId: "principal",
-      date: "2026-05-20",
-      description: "Energia Elétrica / Copel",
-      amount: 198.00,
-      type: "saida",
-      category: "Contas de Consumo (Luz/Água)"
-    },
-    {
-      id: "seed-may-11",
-      caixaId: "principal",
-      date: "2026-05-22",
-      description: "Imposto Simples Nacional DAS",
-      amount: 150.00,
-      type: "saida",
-      category: "Impostos & Tributos (IPTU/IR)"
-    },
+      description: "Assinatura Mensal Software ERP e Nuvem",
+      amount: 4500.00,
+      type: "entrada",
+      category: "Serviços",
+      dueDay: 5,
+      status: "ativo"
+    }
+  ];
+};
 
-    // --- ABRIL 2026 (Mês Anterior para Comparação) ---
+export const INITIAL_CREDIT_CARDS = (): CreditCardData[] => {
+  return [
     {
-      id: "seed-apr-1",
+      id: "card-nubank-uv",
       caixaId: "principal",
-      date: "2026-04-01",
-      description: "Saldo Inicial de Caixa",
-      amount: 12000.00,
+      name: "Nubank Ultravioleta Mastercard Black",
+      lastFourDigits: "8821",
+      brand: "mastercard",
+      color: "#820ad1",
+      limitTotal: 30000.00,
+      closingDay: 25,
+      dueDay: 5,
+      status: "ativo"
+    },
+    {
+      id: "card-itau-infinite",
+      caixaId: "principal",
+      name: "Itaú Personnalité Visa Infinite",
+      lastFourDigits: "4092",
+      brand: "visa",
+      color: "#ec7000",
+      limitTotal: 50000.00,
+      closingDay: 18,
+      dueDay: 28,
+      status: "ativo"
+    }
+  ];
+};
+
+export const INITIAL_TRANSACTIONS = (): Transaction[] => {
+  return [
+    // ==========================================
+    // OUTUBRO 2026 (Mês Atual em Foco)
+    // ==========================================
+    {
+      id: "tx-2026-10-01",
+      caixaId: "principal",
+      date: "2026-10-01",
+      description: "Recebimento Salário / Pró-labore Diretor",
+      amount: 14500.00,
       type: "entrada",
-      category: "Salário"
+      category: "Salário",
+      paymentMethod: "transferencia"
     },
     {
-      id: "seed-apr-2",
+      id: "tx-2026-10-02",
       caixaId: "principal",
-      date: "2026-04-05",
-      description: "Venda de Licenças SaaS",
-      amount: 4800.00,
+      date: "2026-10-02",
+      description: "Venda Contrato Consultoria Tecnológica",
+      amount: 8900.00,
       type: "entrada",
-      category: "Vendas"
+      category: "Serviços",
+      paymentMethod: "pix"
     },
     {
-      id: "seed-apr-3",
+      id: "tx-2026-10-03",
       caixaId: "principal",
-      date: "2026-04-12",
-      description: "Serviço de Consultoria Dev",
-      amount: 3500.00,
+      date: "2026-10-03",
+      description: "Venda de Licenças Software Enterprise",
+      amount: 6800.00,
       type: "entrada",
-      category: "Serviços"
+      category: "Vendas",
+      paymentMethod: "boleto"
     },
     {
-      id: "seed-apr-4",
-      caixaId: "principal",
-      date: "2026-04-15",
-      description: "Aluguéis Recebidos - Casa Sol",
-      amount: 1850.00,
+      id: "tx-rent-rent-lf01-2026-10",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-10-04",
+      description: "[Aluguel LF01] Carlos Eduardo Silva Ref. Outubro de 2026 [Rec: 04/10/2026 via ⚡ PIX] - Obs: Pagamento pontual via Chave PIX",
+      amount: 2220.00,
       type: "entrada",
-      category: "Aluguéis Ativos"
+      category: "Aluguéis Ativos",
+      paymentMethod: "pix"
     },
     {
-      id: "seed-apr-5",
+      id: "tx-2026-10-05",
       caixaId: "principal",
-      date: "2026-04-25",
-      description: "Rendimento FIIs (Dividendos)",
-      amount: 420.00,
+      date: "2026-10-05",
+      description: "Assinatura Mensal Software ERP e Nuvem",
+      amount: 4500.00,
       type: "entrada",
-      category: "Investimentos"
+      category: "Serviços",
+      paymentMethod: "pix",
+      fixedTemplateId: "tpl-demo-6"
     },
     {
-      id: "seed-apr-6",
+      id: "tx-2026-10-06",
       caixaId: "principal",
-      date: "2026-04-05",
-      description: "Servidor de Hospedagem AWS",
-      amount: 420.00,
+      date: "2026-10-06",
+      description: "Supermercado Pão de Açúcar - Compras do Mês",
+      amount: 1250.80,
       type: "saida",
-      category: "Serviços Contratados"
+      category: "Alimentação",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
     },
     {
-      id: "seed-apr-7",
+      id: "tx-2026-10-07",
       caixaId: "principal",
-      date: "2026-04-10",
-      description: "Supermercado Extra",
-      amount: 650.00,
-      type: "saida",
-      category: "Alimentação"
-    },
-    {
-      id: "seed-apr-8",
-      caixaId: "principal",
-      date: "2026-04-11",
-      description: "Aluguel Apartamento",
-      amount: 2100.00,
-      type: "saida",
-      category: "Moradia (Aluguel/IPTU)"
-    },
-    {
-      id: "seed-apr-9",
-      caixaId: "principal",
-      date: "2026-04-15",
-      description: "Manutenção Carro Empresa",
-      amount: 350.00,
-      type: "saida",
-      category: "Transporte"
-    },
-    {
-      id: "seed-apr-10",
-      caixaId: "principal",
-      date: "2026-04-20",
-      description: "Energia Elétrica / Copel",
-      amount: 220.00,
-      type: "saida",
-      category: "Contas de Consumo (Luz/Água)"
-    },
-    {
-      id: "seed-apr-11",
-      caixaId: "principal",
-      date: "2026-04-22",
-      description: "Imposto MEI Mensal",
-      amount: 75.00,
-      type: "saida",
-      category: "Impostos & Tributos (IPTU/IR)"
-    },
-    {
-      id: "seed-apr-12",
-      caixaId: "principal",
-      date: "2026-04-28",
-      description: "Lazer - Jantar em Família",
+      date: "2026-10-07",
+      description: "Combustível Posto Shell V-Power",
       amount: 320.00,
       type: "saida",
-      category: "Lazer"
+      category: "Combustível",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
+    },
+    {
+      id: "tx-2026-10-08",
+      caixaId: "principal",
+      date: "2026-10-08",
+      description: "Restaurante Almoço com Clientes",
+      amount: 410.50,
+      type: "saida",
+      category: "Alimentação",
+      paymentMethod: "cartao_credito",
+      cardId: "card-itau-infinite"
+    },
+    {
+      id: "tx-2026-10-10",
+      caixaId: "principal",
+      date: "2026-10-10",
+      description: "Condomínio Edifício Office Tower",
+      amount: 720.00,
+      type: "saida",
+      category: "Moradia (Aluguel/IPTU)",
+      paymentMethod: "boleto",
+      fixedTemplateId: "tpl-demo-3"
+    },
+    {
+      id: "tx-2026-10-10-b",
+      caixaId: "principal",
+      date: "2026-10-10",
+      description: "Internet Fibra Dedicada 600MB",
+      amount: 189.90,
+      type: "saida",
+      category: "Serviços Contratados",
+      paymentMethod: "pix",
+      fixedTemplateId: "tpl-demo-1"
+    },
+    {
+      id: "tx-rent-rent-lf02-2026-10-part1",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-10-10",
+      description: "[Aluguel LF02] Mariana Souza e Lima - 1ª Parte Ref. Outubro de 2026 [Rec: 10/10/2026 via 💵 Dinheiro / Espécie] - Obs: 1ª parcela paga em mãos em espécie",
+      amount: 2000.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "dinheiro"
+    },
+    {
+      id: "tx-rent-rent-lf02-2026-10-part2",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-10-12",
+      description: "[Aluguel LF02] Mariana Souza e Lima - 2ª Parte Ref. Outubro de 2026 [Rec: 12/10/2026 via 🏦 Transferência / TED] - Obs: 2ª parcela transferida via TED Banco do Brasil",
+      amount: 1790.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-10-14",
+      caixaId: "principal",
+      date: "2026-10-14",
+      description: "Rendimento Dividendos Fundos Imobiliários e Ações",
+      amount: 980.40,
+      type: "entrada",
+      category: "Investimentos",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-10-15",
+      caixaId: "principal",
+      date: "2026-10-15",
+      description: "Honorários Contábeis e Fiscais",
+      amount: 850.00,
+      type: "saida",
+      category: "Serviços Contratados",
+      paymentMethod: "transferencia",
+      fixedTemplateId: "tpl-demo-4"
+    },
+    {
+      id: "tx-2026-10-18",
+      caixaId: "principal",
+      date: "2026-10-18",
+      description: "Energia Elétrica Sede / Copel",
+      amount: 340.00,
+      type: "saida",
+      category: "Contas de Consumo (Luz/Água)",
+      paymentMethod: "boleto",
+      fixedTemplateId: "tpl-demo-2"
+    },
+    {
+      id: "tx-2026-10-20",
+      caixaId: "principal",
+      date: "2026-10-20",
+      description: "Imposto DAS Simples Nacional",
+      amount: 1420.00,
+      type: "saida",
+      category: "Impostos & Tributos (IPTU/IR)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-10-22",
+      caixaId: "principal",
+      date: "2026-10-22",
+      description: "Plano de Saúde Executivo Unimed",
+      amount: 1150.00,
+      type: "saida",
+      category: "Saúde",
+      paymentMethod: "boleto",
+      fixedTemplateId: "tpl-demo-5"
+    },
+    {
+      id: "tx-2026-10-24",
+      caixaId: "principal",
+      date: "2026-10-24",
+      description: "Suprimentos de Escritório e Papelaria",
+      amount: 380.00,
+      type: "saida",
+      category: "Suprimentos",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
+    },
+    {
+      id: "tx-2026-10-26",
+      caixaId: "principal",
+      date: "2026-10-26",
+      description: "Lazer - Cinema e Jantar em Família",
+      amount: 450.00,
+      type: "saida",
+      category: "Lazer",
+      paymentMethod: "cartao_credito",
+      cardId: "card-itau-infinite"
+    },
+    {
+      id: "tx-2026-10-28",
+      caixaId: "principal",
+      date: "2026-10-28",
+      description: "Manutenção Preventiva e Revisão do Veículo",
+      amount: 890.00,
+      type: "saida",
+      category: "Financiamento/Carro",
+      paymentMethod: "pix"
+    },
+
+    // ==========================================
+    // SETEMBRO 2026
+    // ==========================================
+    {
+      id: "tx-2026-09-01",
+      caixaId: "principal",
+      date: "2026-09-01",
+      description: "Recebimento Salário / Pró-labore Diretor",
+      amount: 14500.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-09-03",
+      caixaId: "principal",
+      date: "2026-09-03",
+      description: "Venda de Licenças Software Enterprise",
+      amount: 7200.00,
+      type: "entrada",
+      category: "Vendas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-09-05",
+      caixaId: "principal",
+      date: "2026-09-05",
+      description: "Assinatura Mensal Software ERP e Nuvem",
+      amount: 4500.00,
+      type: "entrada",
+      category: "Serviços",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-rent-rent-lf01-2026-09",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-09-05",
+      description: "[Aluguel LF01] Carlos Eduardo Silva Ref. Setembro de 2026 [Rec: 05/09/2026 via ⚡ PIX]",
+      amount: 2220.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-rent-rent-lf02-2026-09",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-09-10",
+      description: "[Aluguel LF02] Mariana Souza e Lima Ref. Setembro de 2026 [Rec: 10/09/2026 via 🏦 Transferência]",
+      amount: 3790.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-rent-rent-lf03-2026-09",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-09-15",
+      description: "[Aluguel LF03] TechNova Soluções Digitais Ref. Setembro de 2026 [Rec: 15/09/2026 via 📄 Boleto]",
+      amount: 2946.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-rent-rent-lf04-2026-09",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-09-20",
+      description: "[Aluguel LF04] Lucas Gabriel Ferreira Ref. Setembro de 2026 [Rec: 20/09/2026 via ⚡ PIX]",
+      amount: 1435.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-09-10",
+      caixaId: "principal",
+      date: "2026-09-10",
+      description: "Condomínio Edifício Office Tower",
+      amount: 720.00,
+      type: "saida",
+      category: "Moradia (Aluguel/IPTU)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-09-10-b",
+      caixaId: "principal",
+      date: "2026-09-10",
+      description: "Internet Fibra Dedicada 600MB",
+      amount: 189.90,
+      type: "saida",
+      category: "Serviços Contratados",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-09-12",
+      caixaId: "principal",
+      date: "2026-09-12",
+      description: "Supermercado Mensal",
+      amount: 1180.00,
+      type: "saida",
+      category: "Alimentação",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
+    },
+    {
+      id: "tx-2026-09-15",
+      caixaId: "principal",
+      date: "2026-09-15",
+      description: "Honorários Contábeis",
+      amount: 850.00,
+      type: "saida",
+      category: "Serviços Contratados",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-09-18",
+      caixaId: "principal",
+      date: "2026-09-18",
+      description: "Energia Elétrica Copel",
+      amount: 310.00,
+      type: "saida",
+      category: "Contas de Consumo (Luz/Água)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-09-22",
+      caixaId: "principal",
+      date: "2026-09-22",
+      description: "Plano de Saúde Unimed",
+      amount: 1150.00,
+      type: "saida",
+      category: "Saúde",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-09-25",
+      caixaId: "principal",
+      date: "2026-09-25",
+      description: "Combustível e Estacionamento",
+      amount: 450.00,
+      type: "saida",
+      category: "Combustível",
+      paymentMethod: "cartao_credito",
+      cardId: "card-itau-infinite"
+    },
+
+    // ==========================================
+    // AGOSTO 2026
+    // ==========================================
+    {
+      id: "tx-2026-08-01",
+      caixaId: "principal",
+      date: "2026-08-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 14500.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-08-05",
+      caixaId: "principal",
+      date: "2026-08-05",
+      description: "Venda de Software e Serviços",
+      amount: 8400.00,
+      type: "entrada",
+      category: "Vendas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-rent-rent-lf01-2026-08",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-08-05",
+      description: "[Aluguel LF01] Carlos Eduardo Silva Ref. Agosto de 2026 [Rec: 05/08/2026 via ⚡ PIX]",
+      amount: 2220.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-rent-rent-lf02-2026-08",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-08-10",
+      description: "[Aluguel LF02] Mariana Souza e Lima Ref. Agosto de 2026 [Rec: 10/08/2026 via 🏦 Transferência]",
+      amount: 3790.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-rent-rent-lf03-2026-08",
+      caixaId: "contratos_de_aluguel",
+      date: "2026-08-15",
+      description: "[Aluguel LF03] TechNova Soluções Digitais Ref. Agosto de 2026 [Rec: 15/08/2026 via 📄 Boleto]",
+      amount: 2946.00,
+      type: "entrada",
+      category: "Aluguéis Ativos",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-08-10",
+      caixaId: "principal",
+      date: "2026-08-10",
+      description: "Supermercado Mensal",
+      amount: 1320.00,
+      type: "saida",
+      category: "Alimentação",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
+    },
+    {
+      id: "tx-2026-08-15",
+      caixaId: "principal",
+      date: "2026-08-15",
+      description: "Condomínio e Despesas do Imóvel",
+      amount: 720.00,
+      type: "saida",
+      category: "Moradia (Aluguel/IPTU)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-08-20",
+      caixaId: "principal",
+      date: "2026-08-20",
+      description: "Energia Elétrica Copel",
+      amount: 290.00,
+      type: "saida",
+      category: "Contas de Consumo (Luz/Água)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-08-22",
+      caixaId: "principal",
+      date: "2026-08-22",
+      description: "Plano de Saúde Unimed",
+      amount: 1150.00,
+      type: "saida",
+      category: "Saúde",
+      paymentMethod: "boleto"
+    },
+
+    // ==========================================
+    // HISTÓRICO JANEIRO A JULHO 2026
+    // ==========================================
+    {
+      id: "tx-2026-07-01",
+      caixaId: "principal",
+      date: "2026-07-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 14000.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-07-10",
+      caixaId: "principal",
+      date: "2026-07-10",
+      description: "Despesas Gerais de Julho",
+      amount: 4500.00,
+      type: "saida",
+      category: "Outras Despesas",
+      paymentMethod: "cartao_credito",
+      cardId: "card-nubank-uv"
+    },
+    {
+      id: "tx-2026-06-01",
+      caixaId: "principal",
+      date: "2026-06-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 14000.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-06-15",
+      caixaId: "principal",
+      date: "2026-06-15",
+      description: "Consultoria e Serviços Prestados",
+      amount: 6500.00,
+      type: "entrada",
+      category: "Serviços",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-06-20",
+      caixaId: "principal",
+      date: "2026-06-20",
+      description: "Despesas Operacionais e Consumo",
+      amount: 5200.00,
+      type: "saida",
+      category: "Serviços Contratados",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-05-01",
+      caixaId: "principal",
+      date: "2026-05-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 13500.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-05-10",
+      caixaId: "principal",
+      date: "2026-05-10",
+      description: "Venda de Produtos e Serviços",
+      amount: 5800.00,
+      type: "entrada",
+      category: "Vendas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-05-18",
+      caixaId: "principal",
+      date: "2026-05-18",
+      description: "Custos Operacionais de Maio",
+      amount: 4300.00,
+      type: "saida",
+      category: "Outras Despesas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-04-01",
+      caixaId: "principal",
+      date: "2026-04-01",
+      description: "Saldo Inicial Consolidado",
+      amount: 15000.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-04-15",
+      caixaId: "principal",
+      date: "2026-04-15",
+      description: "Serviços de Consultoria Especializada",
+      amount: 7000.00,
+      type: "entrada",
+      category: "Serviços",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-04-20",
+      caixaId: "principal",
+      date: "2026-04-20",
+      description: "Despesas e Impostos de Abril",
+      amount: 4800.00,
+      type: "saida",
+      category: "Impostos & Tributos (IPTU/IR)",
+      paymentMethod: "boleto"
+    },
+    {
+      id: "tx-2026-03-01",
+      caixaId: "principal",
+      date: "2026-03-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 13500.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-03-12",
+      caixaId: "principal",
+      date: "2026-03-12",
+      description: "Despesas Gerais de Março",
+      amount: 3900.00,
+      type: "saida",
+      category: "Outras Despesas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-02-01",
+      caixaId: "principal",
+      date: "2026-02-01",
+      description: "Recebimento Salário / Pró-labore",
+      amount: 13500.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-02-15",
+      caixaId: "principal",
+      date: "2026-02-15",
+      description: "Despesas Gerais de Fevereiro",
+      amount: 3600.00,
+      type: "saida",
+      category: "Outras Despesas",
+      paymentMethod: "pix"
+    },
+    {
+      id: "tx-2026-01-01",
+      caixaId: "principal",
+      date: "2026-01-01",
+      description: "Saldo Inicial de Abertura do Exercício 2026",
+      amount: 20000.00,
+      type: "entrada",
+      category: "Salário",
+      paymentMethod: "transferencia"
+    },
+    {
+      id: "tx-2026-01-15",
+      caixaId: "principal",
+      date: "2026-01-15",
+      description: "Despesas de Início de Ano e IPTU Anual",
+      amount: 4900.00,
+      type: "saida",
+      category: "Moradia (Aluguel/IPTU)",
+      paymentMethod: "boleto"
+    }
+  ];
+};
+
+export const INITIAL_LOGS = (): ActivityLog[] => {
+  return [
+    {
+      id: "log-seed-1",
+      timestamp: new Date().toISOString(),
+      type: "cadastro_aluguel",
+      description: "Base de dados fictícia de demonstração carregada com sucesso com imóveis LF01 a LF04, lançamentos fixos e cartões.",
+      caixaId: "principal"
+    },
+    {
+      id: "log-seed-2",
+      timestamp: new Date(Date.now() - 3600000).toISOString(),
+      type: "reconciliacao_segunda_parte",
+      description: "Parte do aluguel pago no dia 10/10/2026 (R$ 2.000,00 via 💵 Dinheiro) e segunda parte paga no dia 12/10/2026 (R$ 1.790,00 via 🏦 Transferência) para o inquilino \"Mariana Souza e Lima\" (LF02) referente a Outubro de 2026.",
+      amount: 1790.00,
+      caixaId: "contratos_de_aluguel"
     }
   ];
 };
@@ -519,79 +1345,182 @@ export default function App() {
 
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
     const saved = localStorage.getItem("caixa_transacoes");
-    return saved ? JSON.parse(saved) : [];
+    const list: Transaction[] = saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS();
+    // Migration: ensure rental transactions that were mistakenly saved as "Vendas" or duplicate rental category names are normalized to "Aluguéis Ativos"
+    return list.map(t => {
+      const isRental = 
+        (t.id && t.id.startsWith("tx-rent-")) || 
+        (t.description && (t.description.startsWith("[Aluguel ") || t.description.toLowerCase().includes("aluguel conciliado")));
+      const isRentalCat = t.category && (
+        t.category.toLowerCase().trim() === "aluguéis ativos" || 
+        t.category.toLowerCase().trim() === "alugueis ativos"
+      );
+      if ((isRental && (t.category === "Vendas" || !t.category)) || isRentalCat) {
+        return { ...t, category: "Aluguéis Ativos" };
+      }
+      return t;
+    });
   });
 
   const [activeCaixaId, setActiveCaixaId] = useState<string>("principal");
 
-  const [categories, setCategories] = useState<Category[]>(() => {
-    const saved = localStorage.getItem("caixa_categorias");
+  const [deletedCategories, setDeletedCategories] = useState<string[]>(() => {
+    const saved = localStorage.getItem("caixa_deleted_categories");
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (err) {
+        console.error("Error parsing deleted categories", err);
+      }
+    }
+    return [];
+  });
+
+  const [categories, setCategories] = useState<Category[]>(() => {
+    const savedDeleted = localStorage.getItem("caixa_deleted_categories");
+    let deletedList: string[] = [];
+    if (savedDeleted) {
+      try {
+        deletedList = JSON.parse(savedDeleted);
+      } catch (e) {}
+    }
+
+    const isDeleted = (name: string, id?: string) => {
+      const lowerName = name.trim().toLowerCase();
+      return deletedList.some(d => d.toLowerCase() === lowerName || (id && d === id));
+    };
+
+    const saved = localStorage.getItem("caixa_categorias");
+    let loaded: Category[] = [];
+    if (saved) {
+      try {
+        loaded = JSON.parse(saved);
       } catch (err) {
         console.error("Error parsing categories", err);
       }
     }
-    const initial: Category[] = [];
-    CATEGORIES_ENTRADA.forEach(name => {
-      initial.push({
-        id: `cat-in-${name.replace(/\s+/g, '-').toLowerCase()}`,
-        name,
-        type: "entrada",
-        color: CATEGORY_COLORS[name] || "bg-emerald-500"
+    if (!Array.isArray(loaded) || loaded.length === 0) {
+      const initial: Category[] = [];
+      CATEGORIES_ENTRADA.forEach(name => {
+        const id = `cat-in-${name.replace(/\s+/g, '-').toLowerCase()}`;
+        if (!isDeleted(name, id)) {
+          initial.push({
+            id,
+            name,
+            type: "entrada",
+            color: CATEGORY_COLORS[name] || "bg-emerald-500"
+          });
+        }
       });
+      CATEGORIES_SAIDA.forEach(name => {
+        const id = `cat-out-${name.replace(/\s+/g, '-').toLowerCase()}`;
+        if (!isDeleted(name, id)) {
+          initial.push({
+            id,
+            name,
+            type: "saida",
+            color: CATEGORY_COLORS[name] || "bg-rose-500"
+          });
+        }
+      });
+      return initial;
+    }
+
+    // Filter out any previously deleted category if still in array
+    loaded = loaded.filter(c => !isDeleted(c.name, c.id));
+
+    // Ensure dedicated rental category and other defaults exist ONLY IF NOT EXCLUDED
+    CATEGORIES_ENTRADA.forEach(name => {
+      const defaultId = `cat-in-${name.replace(/\s+/g, '-').toLowerCase()}`;
+      if (!isDeleted(name, defaultId) && !loaded.some(c => c.name.toLowerCase() === name.toLowerCase() && c.type === "entrada")) {
+        let id = defaultId;
+        if (loaded.some(c => c.id === id)) {
+          id = `cat-in-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        }
+        loaded.push({
+          id,
+          name,
+          type: "entrada",
+          color: resolveCategoryColorHex(CATEGORY_COLORS[name], name, "entrada")
+        });
+      }
     });
     CATEGORIES_SAIDA.forEach(name => {
-      initial.push({
-        id: `cat-out-${name.replace(/\s+/g, '-').toLowerCase()}`,
-        name,
-        type: "saida",
-        color: CATEGORY_COLORS[name] || "bg-rose-500"
-      });
+      const defaultId = `cat-out-${name.replace(/\s+/g, '-').toLowerCase()}`;
+      if (!isDeleted(name, defaultId) && !loaded.some(c => c.name.toLowerCase() === name.toLowerCase() && c.type === "saida")) {
+        let id = defaultId;
+        if (loaded.some(c => c.id === id)) {
+          id = `cat-out-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        }
+        loaded.push({
+          id,
+          name,
+          type: "saida",
+          color: resolveCategoryColorHex(CATEGORY_COLORS[name], name, "saida")
+        });
+      }
     });
-    return initial;
+
+    // Auto-deduplicate categories (keep only one per normalized name and type)
+    // Guarantee that "Aluguéis Ativos" has its canonical ID and color
+    const uniqueMap = new Map<string, Category>();
+    loaded.forEach(cat => {
+      const norm = cat.name.trim().toLowerCase();
+      const key = `${norm}__${cat.type}`;
+      if (!uniqueMap.has(key)) {
+        uniqueMap.set(key, cat);
+      } else {
+        // If one of the duplicates is the canonical "cat-in-aluguéis-ativos" or "Aluguéis Ativos", prioritize it
+        const current = uniqueMap.get(key)!;
+        if (norm === "aluguéis ativos" || norm === "alugueis ativos") {
+          if (cat.id === "cat-in-aluguéis-ativos" || cat.id === "cat-in-alugueis-ativos") {
+            uniqueMap.set(key, { ...cat, name: "Aluguéis Ativos" });
+          }
+        }
+      }
+    });
+
+    // CRITICAL: Guarantee every single category has a strictly UNIQUE id and valid hex color!
+    const seenCategoryIds = new Set<string>();
+    let idRepaired = false;
+    const deduped = Array.from(uniqueMap.values()).map(cat => {
+      let finalId = cat.id;
+      if (!finalId || seenCategoryIds.has(finalId)) {
+        idRepaired = true;
+        finalId = `cat-${cat.type === "entrada" ? "in" : "out"}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      }
+      seenCategoryIds.add(finalId);
+      const cleanColor = resolveCategoryColorHex(cat.color, cat.name, cat.type);
+      if (cleanColor !== cat.color) {
+        idRepaired = true;
+      }
+      return {
+        ...cat,
+        id: finalId,
+        color: cleanColor
+      };
+    });
+
+    if (idRepaired) {
+      try {
+        localStorage.setItem("caixa_categories", JSON.stringify(deduped));
+      } catch (e) {
+        console.error("Failed to save repaired categories", e);
+      }
+    }
+
+    return deduped;
   });
 
   const getCategoryBgColor = (catName: string) => {
     const found = categories.find(c => c.name === catName);
-    return found ? found.color : (CATEGORY_COLORS[catName] || "bg-zinc-500");
+    return resolveCategoryColorHex(found?.color, catName, "saida");
   };
 
   const getCategoryColorHex = (catName: string): string => {
     const found = categories.find(c => c.name === catName);
-    const colorVal = found ? found.color : "";
-    if (colorVal.startsWith("#")) return colorVal;
-    
-    const classMap: Record<string, string> = {
-      "bg-emerald-500": "#10b981",
-      "bg-cyan-500": "#06b6d4",
-      "bg-indigo-500": "#6366f1",
-      "bg-sky-500": "#0ea5e9",
-      "bg-teal-500": "#14b8a6",
-      "bg-amber-500": "#f59e0b",
-      "bg-red-500": "#ef4444",
-      "bg-orange-500": "#f97316",
-      "bg-purple-600": "#a855f7",
-      "bg-pink-500": "#ec4899",
-      "bg-rose-500": "#f43f5e",
-      "bg-violet-500": "#8b5cf6",
-      "bg-zinc-500": "#71717a"
-    };
-    
-    if (classMap[colorVal]) return classMap[colorVal];
-    
-    const defaultMap: Record<string, string> = {
-      "Alimentação": "#f59e0b",
-      "Moradia": "#ef4444",
-      "Transporte": "#3b82f6",
-      "Saúde": "#f43f5e",
-      "Lazer": "#ec4899",
-      "Impostos": "#a855f7",
-      "Suprimentos": "#f97316",
-      "Serviços Contratados": "#8b5cf6"
-    };
-    return defaultMap[catName] || "#71717a";
+    return resolveCategoryColorHex(found?.color, catName, "saida");
   };
 
   const getCategoryBadgeStyle = (catName: string, type: "entrada" | "saida" = "saida") => {
@@ -600,6 +1529,16 @@ export default function App() {
     const mapped = COLOR_CLASSES_MAP[colorClass];
     if (mapped) return mapped.badge;
     return CATEGORY_BORDER_COLORS[catName] || (type === "entrada" ? "border-emerald-350 text-emerald-700 bg-emerald-50" : "border-zinc-300 text-zinc-700 bg-zinc-50");
+  };
+
+  const getCategoryBadgeInlineStyle = (catName: string, type: "entrada" | "saida" = "saida") => {
+    const found = categories.find(c => c.name === catName);
+    const hex = resolveCategoryColorHex(found?.color, catName, type);
+    return {
+      backgroundColor: `${hex}14`,
+      borderColor: `${hex}38`,
+      color: hex
+    };
   };
 
   // Filter conditions
@@ -611,6 +1550,15 @@ export default function App() {
     return String(new Date().getFullYear());
   });
 
+  const activePeriodStr = useMemo(() => {
+    return filterYear !== "todos" && filterMonth !== "todos"
+      ? `${filterYear}-${filterMonth}`
+      : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+  }, [filterYear, filterMonth]);
+
+  // Overview Donut Charts active tab (3 graphs view, Saidas, Entradas, Misto)
+  const [overviewChartTab, setOverviewChartTab] = useState<"todos" | "saidas" | "entradas" | "misto">("todos");
+
   // Current Input Form states
   const [formDate, setFormDate] = useState(() => {
     return getLocalDateInputValue();
@@ -619,21 +1567,16 @@ export default function App() {
   const [formAmountStr, setFormAmountStr] = useState("");
   const [formCategory, setFormCategory] = useState("Vendas");
 
-  // Selection state for quick feedback categories
-  const [isCategoryDropdownOpen, setIsCategoryDropdownOpen] = useState(false);
-  const categoryDropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (categoryDropdownRef.current && !categoryDropdownRef.current.contains(event.target as Node)) {
-        setIsCategoryDropdownOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, []);
+  // Selection state for category modal on save
+  const [categorySelectionModal, setCategorySelectionModal] = useState<{
+    isOpen: boolean;
+    type: "entrada" | "saida";
+    selectedCategory: string;
+  }>({
+    isOpen: false,
+    type: "entrada",
+    selectedCategory: "Vendas",
+  });
 
   // Google OAuth & Sync States
   const [googleClientId, setGoogleClientId] = useState(() => {
@@ -684,6 +1627,74 @@ export default function App() {
   const [isAlertsExpanded, setIsAlertsExpanded] = useState<boolean>(false);
   const [hideAlertsBanner, setHideAlertsBanner] = useState<boolean>(false);
 
+  // App Update System state & functions
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [showUpdateBanner, setShowUpdateBanner] = useState(false);
+
+  const checkForUpdates = async (simulate = false, manual = false) => {
+    setIsCheckingUpdate(true);
+    try {
+      const res = await fetch(`/api/app-update/check${simulate ? "?simulate=true" : ""}`);
+      if (!res.ok) throw new Error("Falha na consulta de atualização");
+      const data: AppUpdateInfo = await res.json();
+      setUpdateInfo(data);
+
+      if (data.hasUpdate) {
+        const snoozedUntil = localStorage.getItem("update_snoozed_until");
+        const isSnoozed = snoozedUntil && new Date(snoozedUntil).getTime() > Date.now();
+        const dismissedVer = localStorage.getItem("update_dismissed_version");
+        const isDismissed = dismissedVer === data.latestVersion;
+
+        if (manual) {
+          setIsUpdateModalOpen(true);
+        } else if (!isSnoozed && !isDismissed) {
+          setShowUpdateBanner(true);
+        }
+      } else if (manual) {
+        setIsUpdateModalOpen(true);
+      }
+    } catch (err) {
+      console.warn("Erro ao buscar atualizações:", err);
+      if (manual) {
+        setUpdateInfo({
+          hasUpdate: false,
+          currentVersion: "1.0.7",
+          latestVersion: "1.0.7",
+          releaseName: "Versão 1.0.7",
+          releaseNotes: "Não foi possível conectar ao servidor de atualizações do GitHub no momento. Verifique sua conexão com a internet.",
+          publishedAt: new Date().toISOString(),
+          downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
+          installerUrl: null
+        });
+        setIsUpdateModalOpen(true);
+      }
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleSnoozeUpdate = () => {
+    const tomorrow = new Date();
+    tomorrow.setHours(tomorrow.getHours() + 24);
+    localStorage.setItem("update_snoozed_until", tomorrow.toISOString());
+    setShowUpdateBanner(false);
+  };
+
+  const handleDismissVersion = (ver: string) => {
+    localStorage.setItem("update_dismissed_version", ver);
+    setShowUpdateBanner(false);
+  };
+
+  // Background automatic check for updates on app launch
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      checkForUpdates(false, false);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
+
   // Editing transaction state (Inline/Modal)
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
   const [editDate, setEditDate] = useState("");
@@ -691,21 +1702,73 @@ export default function App() {
   const [editAmountStr, setEditAmountStr] = useState("");
   const [editCategory, setEditCategory] = useState("");
   const [editType, setEditType] = useState<"entrada" | "saida" >("entrada");
+  const [editPaymentMethod, setEditPaymentMethod] = useState<PaymentMethod>("dinheiro");
+  const [editCardId, setEditCardId] = useState<string>("");
 
-  // Subtab for Extrato or Fixed templates
-  const [subTab, setSubTab] = useState<"extrato" | "fixas" | "alugueis" | "categorias" | "logs" | "relatorio">("extrato");
+  // Payment method and card input states for transaction form
+  const [formPaymentMethod, setFormPaymentMethod] = useState<PaymentMethod>("dinheiro");
+  const [formCardId, setFormCardId] = useState<string>("");
+  const [formInstallmentsCount, setFormInstallmentsCount] = useState<number>(1);
+  const [filterPaymentMethod, setFilterPaymentMethod] = useState<string>("todos");
+
+  // Credit Cards Management State
+  const [creditCards, setCreditCards] = useState<CreditCardData[]>(() => {
+    const saved = localStorage.getItem("caixa_cartoes_credito");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (err) {
+        console.error("Error parsing credit cards", err);
+      }
+    }
+    return INITIAL_CREDIT_CARDS();
+  });
+
+  useEffect(() => {
+    localStorage.setItem("caixa_cartoes_credito", JSON.stringify(creditCards));
+  }, [creditCards]);
+
+  const activeCards = useMemo(() => {
+    return creditCards.filter(c => !c.caixaId || c.caixaId === activeCaixaId);
+  }, [creditCards, activeCaixaId]);
+
+  // Modal for Confirming/Adjusting Fixed Expense launch (cents adjustment, date, payment method)
+  const [confirmingFixedTpl, setConfirmingFixedTpl] = useState<FixedTemplate | null>(null);
+  const [confirmFixedAmountStr, setConfirmFixedAmountStr] = useState<string>("");
+  const [confirmFixedDate, setConfirmFixedDate] = useState<string>("");
+  const [confirmFixedPaymentMethod, setConfirmFixedPaymentMethod] = useState<PaymentMethod>("dinheiro");
+  const [confirmFixedCardId, setConfirmFixedCardId] = useState<string>("");
+  const [confirmFixedUpdateTemplate, setConfirmFixedUpdateTemplate] = useState<boolean>(false);
+  const [confirmFixedUpdateExistingTx, setConfirmFixedUpdateExistingTx] = useState<boolean>(true);
+
+  // Modal for Editing Base Fixed Template & already posted value
+  const [editingFixedTpl, setEditingFixedTpl] = useState<FixedTemplate | null>(null);
+  const [editFixedDesc, setEditFixedDesc] = useState<string>("");
+  const [editFixedAmountStr, setEditFixedAmountStr] = useState<string>("");
+  const [editFixedDueDay, setEditFixedDueDay] = useState<number>(1);
+  const [editFixedCategory, setEditFixedCategory] = useState<string>("");
+  const [editFixedType, setEditFixedType] = useState<"entrada" | "saida">("saida");
+  // Category Bulk Transfer and Interactive Deletion Modal State
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState<boolean>(false);
+  const [categoryModalMode, setCategoryModalMode] = useState<"transfer" | "delete">("transfer");
+  const [categoryModalSourceId, setCategoryModalSourceId] = useState<string>("");
+
+  // Subtab for Extrato, Fixed templates, Credit Cards, etc.
+  const [subTab, setSubTab] = useState<"extrato" | "fixas" | "cartoes" | "alugueis" | "categorias" | "logs" | "relatorio">("extrato");
 
   // Activity Logs implementation
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>(() => {
     const saved = localStorage.getItem("caixa_activity_logs");
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       } catch (e) {
         console.error(e);
       }
     }
-    return [];
+    return INITIAL_LOGS();
   });
 
   const addLogEntry = (type: string, description: string, amount?: number, customCaixaId?: string) => {
@@ -725,12 +1788,13 @@ export default function App() {
     const saved = localStorage.getItem("caixa_templates_fixos");
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       } catch (err) {
         console.error("Error parsing fixed templates", err);
       }
     }
-    return [];
+    return INITIAL_FIXED_TEMPLATES();
   });
 
   // Rental Properties (Gestão de Aluguéis LF) state
@@ -738,12 +1802,13 @@ export default function App() {
     const saved = localStorage.getItem("caixa_alugueis_fixos");
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       } catch (err) {
         console.error("Error parsing rentals", err);
       }
     }
-    return [];
+    return INITIAL_RENTALS();
   });
 
   // Rental properties sorting states
@@ -789,7 +1854,7 @@ export default function App() {
 
     list.forEach(r => {
       const isPaid = r.paidPeriods.includes(activePeriod);
-      const totalVal = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount;
+      const totalVal = getRentalExpectedAmount(r);
       
       const maxDays = new Date(Number(activeYearStr), Number(activeMonthStr), 0).getDate();
       const actualDueDay = Math.min(r.dueDay, maxDays);
@@ -853,7 +1918,7 @@ export default function App() {
       const actualDueDay = Math.min(r.dueDay, maxDays);
       const dueDateStr = `${activeYearStr}-${activeMonthStr}-${String(actualDueDay).padStart(2, "0")}`;
       
-      const totalVal = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount;
+      const totalVal = getRentalExpectedAmount(r);
       totalPendingAmount += totalVal;
 
       const due = new Date(dueDateStr + "T12:00:00");
@@ -907,8 +1972,8 @@ export default function App() {
         valA = a.rentAmount ?? 0;
         valB = b.rentAmount ?? 0;
       } else if (rentalSortField === "totalReceivable") {
-        valA = (a.rentAmount + a.waterAmount + a.iptuAmount + a.garbageAmount + a.lightAmount + a.fineAmount - a.adminFeeAmount);
-        valB = (b.rentAmount + b.waterAmount + b.iptuAmount + b.garbageAmount + b.lightAmount + b.fineAmount - b.adminFeeAmount);
+        valA = getRentalExpectedAmount(a);
+        valB = getRentalExpectedAmount(b);
       }
       
       if (typeof valA === "string") {
@@ -962,6 +2027,14 @@ export default function App() {
   const [editRentDepositAmountStr, setEditRentDepositAmountStr] = useState("");
   const [editRentDepositStartDate, setEditRentDepositStartDate] = useState("");
   const [editRentDepositInterestRateStr, setEditRentDepositInterestRateStr] = useState("0.5");
+  const [editRentAdjustmentActive, setEditRentAdjustmentActive] = useState(false);
+  const [editRentAdjustmentMode, setEditRentAdjustmentMode] = useState<"add" | "subtract">("add");
+  const [editRentAdjustmentAmountStr, setEditRentAdjustmentAmountStr] = useState("");
+  const [editRentAdjustmentReason, setEditRentAdjustmentReason] = useState("");
+  const [editRentGuaranteeType, setEditRentGuaranteeType] = useState<"caucao" | "fiador" | "nenhuma">("nenhuma");
+  const [editRentGuarantorName, setEditRentGuarantorName] = useState("");
+  const [editRentGuarantorPhone, setEditRentGuarantorPhone] = useState("");
+  const [editRentGuarantorCpf, setEditRentGuarantorCpf] = useState("");
 
   // Deposit (Caução) form states
   const [newRentHasDeposit, setNewRentHasDeposit] = useState(false);
@@ -971,9 +2044,24 @@ export default function App() {
     return getLocalDateInputValue();
   });
   const [newRentDepositInterestRateStr, setNewRentDepositInterestRateStr] = useState("0.5");
+  const [newRentAdjustmentActive, setNewRentAdjustmentActive] = useState(false);
+  const [newRentAdjustmentMode, setNewRentAdjustmentMode] = useState<"add" | "subtract">("add");
+  const [newRentAdjustmentAmountStr, setNewRentAdjustmentAmountStr] = useState("");
+  const [newRentAdjustmentReason, setNewRentAdjustmentReason] = useState("");
+  const [newRentGuaranteeType, setNewRentGuaranteeType] = useState<"caucao" | "fiador" | "nenhuma">("nenhuma");
+  const [newRentGuarantorName, setNewRentGuarantorName] = useState("");
+  const [newRentGuarantorPhone, setNewRentGuarantorPhone] = useState("");
+  const [newRentGuarantorCpf, setNewRentGuarantorCpf] = useState("");
 
   // Selected rental for the Deposit details modal
   const [selectedDepositRental, setSelectedDepositRental] = useState<RentalProperty | null>(null);
+
+  // Selected rental for the Adjustments manager modal
+  const [managingAdjustmentsRental, setManagingAdjustmentsRental] = useState<RentalProperty | null>(null);
+  const [adjFormMode, setAdjFormMode] = useState<"add" | "subtract">("add");
+  const [adjFormAmountStr, setAdjFormAmountStr] = useState("");
+  const [adjFormDesc, setAdjFormDesc] = useState("");
+  const [adjFormRecurrence, setAdjFormRecurrence] = useState<"pontual" | "fixo">("pontual");
 
   // SGS Savings series 195 states from Banco Central
   const [sgsRates, setSgsRates] = useState<Record<string, number>>({});
@@ -1008,21 +2096,45 @@ export default function App() {
     fetchSgsRates();
   }, []);
 
-  // States for interactive confirmation of rent payments with actual receive date
+  // States for interactive confirmation of rent payments with actual receive date and payment methods
   const [receiptConfirmingRental, setReceiptConfirmingRental] = useState<RentalProperty | null>(null);
   const [receiptConfirmingPeriod, setReceiptConfirmingPeriod] = useState<string>("");
   const [receiptDateInput, setReceiptDateInput] = useState<string>("");
   const [receiptAmountInput, setReceiptAmountInput] = useState<string>("");
+  const [receiptPaymentMethod, setReceiptPaymentMethod] = useState<string>("pix");
+  const [receiptObservation, setReceiptObservation] = useState<string>("");
   const [receiptShortfallTreatment, setReceiptShortfallTreatment] = useState<"pending" | "forgiven">("pending");
   const [receiptLateFeeTreatment, setReceiptLateFeeTreatment] = useState<"suggested" | "waived">("suggested");
+
+  // Split payment / 2nd part inside initial receipt modal
+  const [receiptHasSplitPart, setReceiptHasSplitPart] = useState<boolean>(false);
+  const [receiptSplitAmountInput, setReceiptSplitAmountInput] = useState<string>("");
+  const [receiptSplitDateInput, setReceiptSplitDateInput] = useState<string>("");
+  const [receiptSplitPaymentMethod, setReceiptSplitPaymentMethod] = useState<string>("transferencia");
+  const [receiptSplitObservation, setReceiptSplitObservation] = useState<string>("");
+
+  // Modal for receiving 2nd part later (when shortfall was left as pending)
+  const [payingShortfallRental, setPayingShortfallRental] = useState<RentalProperty | null>(null);
+  const [payingShortfallPeriod, setPayingShortfallPeriod] = useState<string>("");
+  const [payingShortfallAmountInput, setPayingShortfallAmountInput] = useState<string>("");
+  const [payingShortfallDateInput, setPayingShortfallDateInput] = useState<string>("");
+  const [payingShortfallPaymentMethod, setPayingShortfallPaymentMethod] = useState<string>("transferencia");
+  const [payingShortfallObservation, setPayingShortfallObservation] = useState<string>("");
 
   const resetReceiptConfirmation = () => {
     setReceiptConfirmingRental(null);
     setReceiptConfirmingPeriod("");
     setReceiptDateInput("");
     setReceiptAmountInput("");
+    setReceiptPaymentMethod("pix");
+    setReceiptObservation("");
     setReceiptShortfallTreatment("pending");
     setReceiptLateFeeTreatment("suggested");
+    setReceiptHasSplitPart(false);
+    setReceiptSplitAmountInput("");
+    setReceiptSplitDateInput("");
+    setReceiptSplitPaymentMethod("transferencia");
+    setReceiptSplitObservation("");
   };
 
   const handleUpdateRentalDeposit = (updatedRental: RentalProperty) => {
@@ -1099,6 +2211,10 @@ export default function App() {
   }, [categories]);
 
   useEffect(() => {
+    localStorage.setItem("caixa_deleted_categories", JSON.stringify(deletedCategories));
+  }, [deletedCategories]);
+
+  useEffect(() => {
     localStorage.setItem("caixa_activity_logs", JSON.stringify(activityLogs));
   }, [activityLogs]);
 
@@ -1120,7 +2236,7 @@ export default function App() {
     localStorage.setItem("caixa_last_updated", String(now));
 
     triggerAutoBackup();
-  }, [caixas, transactions, fixedTemplates, rentals, categories, activityLogs]);
+  }, [caixas, transactions, fixedTemplates, rentals, categories, activityLogs, creditCards]);
 
   const fetchGoogleUserInfo = async (token: string) => {
     try {
@@ -1161,7 +2277,9 @@ export default function App() {
       fixedTemplates,
       rentals,
       categories,
+      deletedCategories,
       activityLogs,
+      creditCards,
       lastUpdated
     };
 
@@ -1301,16 +2419,46 @@ export default function App() {
         const mergedTransactions = mergeArraysById<Transaction>(transactions, driveData.transactions || []);
         const mergedTemplates = mergeArraysById<FixedTemplate>(fixedTemplates, driveData.fixedTemplates || []);
         const mergedRentals = mergeArraysById<RentalProperty>(rentals, driveData.rentals || []);
-        const mergedCategories = mergeArraysById<Category>(categories, driveData.categories || []);
+        const mergedDeleted = Array.from(new Set([...deletedCategories, ...(driveData.deletedCategories || [])]));
+        let rawCategories = mergeArraysById<Category>(categories, driveData.categories || [])
+          .filter(c => !mergedDeleted.some(d => d.toLowerCase() === c.name.toLowerCase() || d === c.id));
+
+        // Deduplicate categories by normalized name and type
+        const catMap = new Map<string, Category>();
+        rawCategories.forEach(c => {
+          const key = `${c.name.trim().toLowerCase()}__${c.type}`;
+          if (!catMap.has(key)) {
+            catMap.set(key, c);
+          } else if (c.id === "cat-in-aluguéis-ativos" || c.id === "cat-in-alugueis-ativos") {
+            catMap.set(key, { ...c, name: "Aluguéis Ativos" });
+          }
+        });
+        const mergedCategories = Array.from(catMap.values());
+
+        // Normalize rental categories in merged transactions
+        const normalizedMergedTransactions = mergedTransactions.map(t => {
+          const isRentalCat = t.category && (
+            t.category.toLowerCase().trim() === "aluguéis ativos" || 
+            t.category.toLowerCase().trim() === "alugueis ativos"
+          );
+          if (isRentalCat) {
+            return { ...t, category: "Aluguéis Ativos" };
+          }
+          return t;
+        });
+
+        const mergedCards = mergeArraysById<CreditCardData>(creditCards, driveData.creditCards || []);
         const mergedLogs = mergeArraysById<ActivityLog>(activityLogs, driveData.activityLogs || [])
           .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
         // Update states in React
         setCaixas(mergedCaixas);
-        setTransactions(mergedTransactions);
+        setTransactions(normalizedMergedTransactions);
         setFixedTemplates(mergedTemplates);
         setRentals(mergedRentals);
+        setDeletedCategories(mergedDeleted);
         setCategories(mergedCategories);
+        setCreditCards(mergedCards);
         setActivityLogs(mergedLogs);
 
         const newTS = Math.max(localTS, driveTS) + 1;
@@ -1328,6 +2476,8 @@ export default function App() {
           fixedTemplates: mergedTemplates,
           rentals: mergedRentals,
           categories: mergedCategories,
+          deletedCategories: mergedDeleted,
+          creditCards: mergedCards,
           activityLogs: mergedLogs,
           lastUpdated: newTS
         };
@@ -1338,18 +2488,14 @@ export default function App() {
       setSyncStatus("synced");
     } catch (err: any) {
       console.error("Error restoring/syncing with Google Drive:", err);
-      if (err.message?.includes("401") || err.message?.includes("Unauthorized")) {
-        console.log("Token expired during download. Triggering silent refresh...");
-        requestSilentToken();
-      } else {
-        setSyncStatus("error");
-      }
+      setSyncStatus("error");
     }
   };
 
   const triggerAutoBackup = () => {
     const currentToken = accessToken || localStorage.getItem("caixa_google_token");
-    if (!currentToken && !isGoogleConnected) return;
+    // Only attempt backup if an active token and connection exist
+    if (!currentToken || !isGoogleConnected) return;
 
     setSyncStatus("syncing");
 
@@ -1362,44 +2508,10 @@ export default function App() {
         await uploadToGoogleDrive();
         setSyncStatus("synced");
       } catch (err: any) {
-        console.error("Auto-backup failed:", err);
-        if (err.message?.includes("401") || err.message?.includes("Unauthorized")) {
-          console.log("Token expired. Trying to refresh silently...");
-          requestSilentToken();
-        } else {
-          setSyncStatus("error");
-        }
+        console.warn("Auto-backup deferred or failed silently:", err);
+        setSyncStatus("error");
       }
     }, 4000);
-  };
-
-  const requestSilentToken = () => {
-    if (!googleClientId) return;
-    try {
-      setSyncStatus("syncing");
-      const tokenClient = (window as any).google.accounts.oauth2.initTokenClient({
-        client_id: googleClientId,
-        scope: "https://www.googleapis.com/auth/drive.appdata",
-        callback: async (tokenResponse: any) => {
-          if (tokenResponse.error) {
-            console.warn("Silent token request failed:", tokenResponse.error);
-            handleLogoutGoogle();
-            return;
-          }
-          const token = tokenResponse.access_token;
-          setAccessToken(token);
-          localStorage.setItem("caixa_google_token", token);
-          localStorage.setItem("caixa_google_token_expiry", String(Date.now() + 3500 * 1000));
-          setIsGoogleConnected(true);
-          await fetchGoogleUserInfo(token);
-          await downloadAndRestoreFromGoogleDrive(token);
-        }
-      });
-      tokenClient.requestAccessToken({ prompt: "" });
-    } catch (err) {
-      console.warn("Failed to initiate silent token client:", err);
-      setSyncStatus("error");
-    }
   };
 
   const handleConnectGoogle = () => {
@@ -1410,7 +2522,7 @@ export default function App() {
 
     try {
       setSyncStatus("syncing");
-      const tokenClient = (window as any).google.accounts.oauth2.initTokenClient({
+      const tokenClient = (window as any).google?.accounts?.oauth2?.initTokenClient({
         client_id: googleClientId,
         scope: "https://www.googleapis.com/auth/drive.appdata",
         callback: async (tokenResponse: any) => {
@@ -1430,7 +2542,12 @@ export default function App() {
           await downloadAndRestoreFromGoogleDrive(token);
         }
       });
-      tokenClient.requestAccessToken({ prompt: "consent" });
+      if (tokenClient) {
+        tokenClient.requestAccessToken({ prompt: "consent" });
+      } else {
+        alert("O serviço de autenticação do Google ainda está carregando. Tente novamente em alguns instantes.");
+        setSyncStatus("error");
+      }
     } catch (err) {
       console.error("Failed to login with Google:", err);
       alert("Erro ao iniciar login com Google. Verifique se o Client ID está configurado corretamente.");
@@ -1450,19 +2567,24 @@ export default function App() {
     setSyncStatus("idle");
   };
 
-  // Startup silent login/sync
+  // Safe Startup session restoration without opening popups or flashing windows
   useEffect(() => {
-    if (localStorage.getItem("caixa_google_connected") === "true" && googleClientId) {
-      const checkInterval = setInterval(() => {
-        if ((window as any).google?.accounts?.oauth2?.initTokenClient) {
-          clearInterval(checkInterval);
-          requestSilentToken();
-        }
-      }, 500);
-      
-      setTimeout(() => clearInterval(checkInterval), 10000);
+    const savedToken = localStorage.getItem("caixa_google_token");
+    const expiryStr = localStorage.getItem("caixa_google_token_expiry");
+    const wasConnected = localStorage.getItem("caixa_google_connected") === "true";
+
+    if (wasConnected && savedToken && expiryStr) {
+      const expiry = Number(expiryStr);
+      if (Date.now() < expiry) {
+        setAccessToken(savedToken);
+        setIsGoogleConnected(true);
+      } else {
+        // Token has expired naturally, set state without popping up any UI
+        setIsGoogleConnected(false);
+        setSyncStatus("idle");
+      }
     }
-  }, [googleClientId]);
+  }, []);
 
   // Adjust default category based on selected transaction type
   const setFormTransactionTypeDefaults = (type: "entrada" | "saida") => {
@@ -1481,8 +2603,11 @@ export default function App() {
   };
 
   const resolveCategoryForType = (categoryName: string, type: "entrada" | "saida") => {
-    const selected = categories.find(c => c.name === categoryName);
-    if (selected?.type === type) return selected.name;
+    const selected = categories.find(c => c.name.toLowerCase() === categoryName.toLowerCase() && c.type === type);
+    if (selected) return selected.name;
+    if (type === "entrada" && (categoryName.toLowerCase().includes("aluguel") || categoryName.toLowerCase().includes("aluguéis"))) {
+      return "Aluguéis Ativos";
+    }
     return getDefaultCategoryForType(type);
   };
 
@@ -1577,13 +2702,19 @@ export default function App() {
           if (!descMatch && !catMatch) return false;
         }
 
+        // Payment method filter
+        if (filterPaymentMethod !== "todos") {
+          const method = t.paymentMethod || "dinheiro";
+          if (method !== filterPaymentMethod) return false;
+        }
+
         return true;
       })
       // Sort oldest to newest (to visualize like a chronologic balance sheet) or vice-versa? 
       // Financial statements look great newest first, but running balance works oldest first.
       // Let's sort newest first for ledger entries so they are easy to edit.
       .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
-  }, [transactions, activeCaixaId, filterMonth, filterYear, searchQuery]);
+  }, [transactions, activeCaixaId, filterMonth, filterYear, searchQuery, filterPaymentMethod]);
 
   const saldoAnterior = useMemo(() => {
     // If everything is selected, there is no carryover balance
@@ -1670,7 +2801,7 @@ export default function App() {
       .sort((a, b) => b.total - a.total);
   }, [filteredTransactions, categories]);
 
-  // Actions
+  // Actions - Open category selection modal when user clicks Entrada or Saída
   const handleAddTransaction = (type: "entrada" | "saida") => {
     const rawVal = parseCurrencyInput(formAmountStr);
     if (isNaN(rawVal) || rawVal <= 0) {
@@ -1682,35 +2813,73 @@ export default function App() {
       return;
     }
 
-    const safeCategory = resolveCategoryForType(formCategory, type);
-    const newTx: Transaction = {
-      id: "tx-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
-      caixaId: activeCaixaId,
-      date: formDate,
-      description: formDescription.trim(),
-      amount: rawVal,
+    const typeCats = categories.filter(c => c.type === type);
+    let initialCat = "";
+    if (formCategory && typeCats.some(c => c.name.toLowerCase() === formCategory.toLowerCase())) {
+      initialCat = typeCats.find(c => c.name.toLowerCase() === formCategory.toLowerCase())!.name;
+    } else if (typeCats.length > 0) {
+      initialCat = typeCats[0].name;
+    } else {
+      initialCat = type === "entrada" ? "Vendas" : "Alimentação";
+    }
+
+    setCategorySelectionModal({
+      isOpen: true,
       type,
-      category: safeCategory
-    };
+      selectedCategory: initialCat
+    });
+  };
+
+  const handleConfirmCategoryAndSave = (chosenCategory: string) => {
+    const type = categorySelectionModal.type;
+    const rawVal = parseCurrencyInput(formAmountStr);
+    if (isNaN(rawVal) || rawVal <= 0) return;
+    if (!formDescription.trim()) return;
+
+    const safeCategory = resolveCategoryForType(chosenCategory, type);
+    const numInstallments = formPaymentMethod === "cartao_credito" && formInstallmentsCount > 1 ? formInstallmentsCount : 1;
+    const installmentAmount = rawVal / numInstallments;
+    const baseDate = new Date(formDate + "T12:00:00");
+    const createdTxs: Transaction[] = [];
+
+    for (let i = 1; i <= numInstallments; i++) {
+      const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + (i - 1), baseDate.getDate());
+      const dateStr = d.toISOString().split("T")[0];
+      const desc = numInstallments > 1
+        ? `${formDescription.trim()} (${i}/${numInstallments})`
+        : formDescription.trim();
+
+      createdTxs.push({
+        id: "tx-" + Date.now() + "-" + i + "-" + Math.random().toString(36).substr(2, 4),
+        caixaId: activeCaixaId,
+        date: dateStr,
+        description: desc,
+        amount: installmentAmount,
+        type,
+        category: safeCategory,
+        paymentMethod: formPaymentMethod,
+        cardId: formPaymentMethod === "cartao_credito" ? formCardId : undefined,
+        installments: numInstallments > 1 ? { current: i, total: numInstallments } : undefined
+      });
+    }
 
     if (safeCategory !== formCategory) {
       setFormCategory(safeCategory);
     }
-    setTransactions(prev => [newTx, ...prev]);
+    setTransactions(prev => [...createdTxs, ...prev]);
 
     // Add log entry
     addLogEntry(
       type === "entrada" ? "receita" : "despesa",
-      `Lançamento manual registrado: "${newTx.description}" na categoria "${newTx.category}" no valor de ${newTx.amount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`,
-      newTx.amount
+      `Lançamento manual registrado: "${formDescription.trim()}" (${formPaymentMethod}) na categoria "${safeCategory}" no valor total de ${rawVal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}${numInstallments > 1 ? ` em ${numInstallments}x` : ""}.`,
+      rawVal
     );
 
     // Reset fields except date for easier fast inputs
     setFormDescription("");
     setFormAmountStr("");
-    setIsCategoryDropdownOpen(false);
-
-    // Dynamic toast logic can be visual
+    setFormInstallmentsCount(1);
+    setCategorySelectionModal(prev => ({ ...prev, isOpen: false }));
   };
 
   // Caixa Tab controls
@@ -1778,6 +2947,8 @@ export default function App() {
     setEditAmountStr(String(t.amount).replace(".", ","));
     setEditCategory(t.category);
     setEditType(t.type);
+    setEditPaymentMethod(t.paymentMethod || "dinheiro");
+    setEditCardId(t.cardId || "");
   };
 
   const handleSaveEdit = () => {
@@ -1807,7 +2978,9 @@ export default function App() {
           description: editDescription.trim(),
           amount: rawVal,
           category: editCategory,
-          type: editType
+          type: editType,
+          paymentMethod: editPaymentMethod,
+          cardId: editPaymentMethod === "cartao_credito" ? editCardId : undefined
         };
       }
       return t;
@@ -1841,6 +3014,7 @@ export default function App() {
     setTransactions([]);
     setFixedTemplates([]);
     setRentals([]);
+    setCreditCards([]);
     setActiveCaixaId("principal");
     setFilterMonth(String(new Date().getMonth() + 1).padStart(2, "0"));
     setFilterYear(String(new Date().getFullYear()));
@@ -1848,6 +3022,37 @@ export default function App() {
     setAiInsights(null);
     setIsResetConfirmOpen(false);
     setActivityLogs([]);
+  };
+
+  const handleLoadDemoData = (confirmFirst = true) => {
+    if (confirmFirst && !window.confirm("Deseja carregar a base de dados fictícios completa para demonstração?\n\nIsso preencherá o extrato do ano de 2026, 4 contratos de aluguel (LF01 a LF04 com recebimentos e divisão em dinheiro/PIX/transferência), cartões de crédito e despesas fixas recorrentes para você testar todas as funcionalidades e relatórios do sistema.")) {
+      return;
+    }
+
+    const demoTxs = INITIAL_TRANSACTIONS();
+    const demoRentals = INITIAL_RENTALS();
+    const demoFixed = INITIAL_FIXED_TEMPLATES();
+    const demoCards = INITIAL_CREDIT_CARDS();
+    const demoLogs = INITIAL_LOGS();
+
+    setCaixas(INITIAL_CAIXAS);
+    setTransactions(demoTxs);
+    setRentals(demoRentals);
+    setFixedTemplates(demoFixed);
+    setCreditCards(demoCards);
+    setActivityLogs(demoLogs);
+    setActiveCaixaId("principal");
+    setFilterYear("2026");
+    setFilterMonth("10");
+
+    localStorage.setItem("caixa_contas", JSON.stringify(INITIAL_CAIXAS));
+    localStorage.setItem("caixa_transacoes", JSON.stringify(demoTxs));
+    localStorage.setItem("caixa_alugueis_fixos", JSON.stringify(demoRentals));
+    localStorage.setItem("caixa_templates_fixos", JSON.stringify(demoFixed));
+    localStorage.setItem("caixa_cartoes_credito", JSON.stringify(demoCards));
+    localStorage.setItem("caixa_activity_logs", JSON.stringify(demoLogs));
+
+    alert("✨ Dados de demonstração carregados com sucesso! O período de visualização foi posicionado em Outubro de 2026.");
   };
 
   // Fixed Templates actions
@@ -1888,33 +3093,233 @@ export default function App() {
     }
   };
 
-  const handlePostFixedTemplate = (tpl: FixedTemplate) => {
+  const getPostedTxForFixed = (tpl: FixedTemplate, year?: string, month?: string): Transaction | undefined => {
+    const y = year || (filterYear !== "todos" ? filterYear : String(new Date().getFullYear()));
+    const m = month || (filterMonth !== "todos" ? filterMonth : String(new Date().getMonth() + 1).padStart(2, "0"));
+    const periodPrefix = `${y}-${m}`;
+
+    return transactions.find(t => 
+      t.caixaId === (tpl.caixaId || activeCaixaId) &&
+      t.type === tpl.type &&
+      t.date.startsWith(periodPrefix) &&
+      (
+        (t.fixedTemplateId && t.fixedTemplateId === tpl.id) ||
+        t.description.toLowerCase().includes(tpl.description.toLowerCase()) ||
+        t.description.toLowerCase() === `[fixo] ${tpl.description.toLowerCase()}`
+      )
+    );
+  };
+
+  const openLaunchFixedModal = (tpl: FixedTemplate) => {
+    setConfirmingFixedTpl(tpl);
+    setConfirmFixedAmountStr(tpl.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     const today = new Date();
     const targetYear = filterYear !== "todos" ? filterYear : String(today.getFullYear());
     const targetMonth = filterMonth !== "todos" ? filterMonth : String(today.getMonth() + 1).padStart(2, "0");
     const actualDueDay = clampDayToMonth(targetYear, targetMonth, tpl.dueDay);
     const paddedDay = String(actualDueDay).padStart(2, "0");
-    const launchDate = `${targetYear}-${targetMonth}-${paddedDay}`;
+    setConfirmFixedDate(`${targetYear}-${targetMonth}-${paddedDay}`);
+    setConfirmFixedPaymentMethod("dinheiro");
+    setConfirmFixedCardId(creditCards.length > 0 ? creditCards[0].id : "");
+    setConfirmFixedUpdateTemplate(false);
+    
+    const existingTx = getPostedTxForFixed(tpl, targetYear, targetMonth);
+    setConfirmFixedUpdateExistingTx(Boolean(existingTx));
+  };
+
+  const handleConfirmLaunchFixed = () => {
+    if (!confirmingFixedTpl) return;
+    const rawVal = parseCurrencyInput(confirmFixedAmountStr);
+    if (isNaN(rawVal) || rawVal <= 0) {
+      alert("Por favor, insira um valor numérico válido maior que zero.");
+      return;
+    }
+
+    // Se o usuário optou por atualizar o valor base cadastrado no modelo fixo
+    if (confirmFixedUpdateTemplate) {
+      setFixedTemplates(prev => prev.map(t => {
+        if (t.id === confirmingFixedTpl.id) {
+          return { ...t, amount: rawVal };
+        }
+        return t;
+      }));
+    }
+
+    const targetYear = confirmFixedDate.split("-")[0];
+    const targetMonth = confirmFixedDate.split("-")[1];
+    const existingTx = getPostedTxForFixed(confirmingFixedTpl, targetYear, targetMonth);
+
+    // Se já existia transação e usuário optou por atualizar a existente
+    if (existingTx && confirmFixedUpdateExistingTx) {
+      setTransactions(prev => prev.map(t => {
+        if (t.id === existingTx.id) {
+          return {
+            ...t,
+            date: confirmFixedDate,
+            amount: rawVal,
+            paymentMethod: confirmFixedPaymentMethod,
+            cardId: confirmFixedPaymentMethod === "cartao_credito" ? confirmFixedCardId : undefined,
+            fixedTemplateId: confirmingFixedTpl.id
+          };
+        }
+        return t;
+      }));
+
+      addLogEntry(
+        "modelo_fixo",
+        `Lançamento fixo "${confirmingFixedTpl.description}" atualizado no extrato do mês para ${rawVal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} via ${confirmFixedPaymentMethod}.${confirmFixedUpdateTemplate ? " Valor base do modelo fixo também foi atualizado." : ""}`,
+        rawVal
+      );
+    } else {
+      const newTx: Transaction = {
+        id: "tx-posted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+        caixaId: confirmingFixedTpl.caixaId || activeCaixaId,
+        date: confirmFixedDate,
+        description: `[Fixo] ${confirmingFixedTpl.description}`,
+        amount: rawVal,
+        type: confirmingFixedTpl.type,
+        category: resolveCategoryForType(confirmingFixedTpl.category, confirmingFixedTpl.type),
+        paymentMethod: confirmFixedPaymentMethod,
+        cardId: confirmFixedPaymentMethod === "cartao_credito" ? confirmFixedCardId : undefined,
+        fixedTemplateId: confirmingFixedTpl.id
+      };
+
+      setTransactions(prev => [newTx, ...prev]);
+
+      addLogEntry(
+        "modelo_fixo",
+        `Lançamento fixo executado no extrato: "${confirmingFixedTpl.description}" no valor de ${rawVal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} via ${confirmFixedPaymentMethod}.${confirmFixedUpdateTemplate ? " Valor base do modelo fixo também foi atualizado." : ""}`,
+        rawVal
+      );
+    }
+
+    setConfirmingFixedTpl(null);
+  };
+
+  const openEditFixedModal = (tpl: FixedTemplate) => {
+    setEditingFixedTpl(tpl);
+    setEditFixedDesc(tpl.description);
+    setEditFixedAmountStr(tpl.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    setEditFixedDueDay(tpl.dueDay || 1);
+    setEditFixedCategory(tpl.category);
+    setEditFixedType(tpl.type);
+    setEditFixedUpdateMonthTx(true);
+  };
+
+  const handleSaveEditFixed = () => {
+    if (!editingFixedTpl) return;
+    const rawVal = parseCurrencyInput(editFixedAmountStr);
+    if (isNaN(rawVal) || rawVal <= 0) {
+      alert("Por favor, insira um valor numérico válido maior que zero.");
+      return;
+    }
+    if (!editFixedDesc.trim()) {
+      alert("Por favor, digite uma descrição para o lançamento fixo.");
+      return;
+    }
+
+    const safeCat = resolveCategoryForType(editFixedCategory, editFixedType);
+    const day = Math.min(31, Math.max(1, Number(editFixedDueDay) || 1));
+    const oldAmount = editingFixedTpl.amount;
+    const oldDesc = editingFixedTpl.description;
+
+    // 1. Atualizar o modelo fixo
+    setFixedTemplates(prev => prev.map(t => {
+      if (t.id === editingFixedTpl.id) {
+        return {
+          ...t,
+          description: editFixedDesc.trim(),
+          amount: rawVal,
+          dueDay: day,
+          category: safeCat,
+          type: editFixedType
+        };
+      }
+      return t;
+    }));
+
+    // 2. Se o usuário marcou para atualizar lançamento já realizado no mês
+    let updatedTxMsg = "";
+    if (editFixedUpdateMonthTx) {
+      const targetYear = filterYear !== "todos" ? filterYear : String(new Date().getFullYear());
+      const targetMonth = filterMonth !== "todos" ? filterMonth : String(new Date().getMonth() + 1).padStart(2, "0");
+      const existingTx = getPostedTxForFixed(editingFixedTpl, targetYear, targetMonth);
+
+      if (existingTx) {
+        setTransactions(prev => prev.map(t => {
+          if (t.id === existingTx.id) {
+            return {
+              ...t,
+              amount: rawVal,
+              description: `[Fixo] ${editFixedDesc.trim()}`,
+              category: safeCat,
+              type: editFixedType
+            };
+          }
+          return t;
+        }));
+        updatedTxMsg = ` e lançamento já registrado no mês foi sincronizado para ${rawVal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`;
+      }
+    }
+
+    addLogEntry(
+      "edicao_fixo",
+      `Lançamento fixo "${oldDesc}" atualizado para "${editFixedDesc.trim()}" (Valor base: ${oldAmount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} ➔ ${rawVal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}, Vencimento: dia ${day})${updatedTxMsg}`,
+      rawVal
+    );
+
+    setEditingFixedTpl(null);
+  };
+
+  const handlePostFixedTemplate = (tpl: FixedTemplate) => {
+    openLaunchFixedModal(tpl);
+  };
+
+  // Credit Cards handlers
+  const handleSaveCreditCard = (card: CreditCardData) => {
+    setCreditCards(prev => {
+      const exists = prev.some(c => c.id === card.id);
+      if (exists) {
+        return prev.map(c => c.id === card.id ? card : c);
+      }
+      return [card, ...prev];
+    });
+    addLogEntry("cartao", `Cartão de crédito "${card.name}" cadastrado/atualizado.`);
+  };
+
+  const handleDeleteCreditCard = (cardId: string) => {
+    const card = creditCards.find(c => c.id === cardId);
+    if (confirm(`Deseja mesmo remover o cartão "${card?.name || ""}"? As compras já lançadas no extrato não serão apagadas.`)) {
+      setCreditCards(prev => prev.filter(c => c.id !== cardId));
+      addLogEntry("cartao", `Cartão de crédito "${card?.name || ""}" removido.`);
+    }
+  };
+
+  const handlePostCardInvoiceToLedger = (card: CreditCardData, amount: number, dueDate: string, periodLabel: string) => {
+    if (amount <= 0) {
+      alert("O valor da fatura está zerado.");
+      return;
+    }
 
     const newTx: Transaction = {
-      id: "tx-posted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
-      caixaId: tpl.caixaId || activeCaixaId,
-      date: launchDate,
-      description: `[Fixo] ${tpl.description}`,
-      amount: tpl.amount,
-      type: tpl.type,
-      category: resolveCategoryForType(tpl.category, tpl.type)
+      id: "tx-invoice-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+      caixaId: activeCaixaId,
+      date: dueDate,
+      description: `[Fatura] Cartão ${card.name} (${periodLabel})`,
+      amount: amount,
+      type: "saida",
+      category: resolveCategoryForType("Cartão de Crédito", "saida") || "Outras Despesas",
+      paymentMethod: "cartao_credito",
+      cardId: card.id
     };
 
     setTransactions(prev => [newTx, ...prev]);
-    
     addLogEntry(
-      "modelo_fixo",
-      `Lançamento fixo executado no extrato: "${tpl.description}" (Vencimento Dia ${tpl.dueDay}) no valor de ${tpl.amount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`,
-      tpl.amount
+      "transacao",
+      `Fatura do cartão "${card.name}" lançada no extrato para vencimento em ${formatDateBRL(dueDate)} no valor de ${amount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`,
+      amount
     );
-
-    alert(`Sucesso! "${tpl.description}" lançado no extrato na data de ${formatDateBRL(launchDate)}.`);
+    alert(`Sucesso! Fatura do cartão "${card.name}" de R$ ${amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} lançada no extrato para vencimento em ${formatDateBRL(dueDate)}.`);
   };
 
   // Helper date period displayer Ex: "Janeiro de 2026"
@@ -1958,6 +3363,12 @@ export default function App() {
       return;
     }
 
+    const isCaucao = newRentGuaranteeType === "caucao" || newRentHasDeposit;
+    const isFiador = newRentGuaranteeType === "fiador";
+    const adjustmentAmount = newRentAdjustmentActive ? parseFormattedVal(newRentAdjustmentAmountStr) : 0;
+    const adjustmentMode = newRentAdjustmentMode;
+    const adjustmentReason = newRentAdjustmentActive ? newRentAdjustmentReason.trim() : undefined;
+
     const newRental: RentalProperty = {
       id: "rent-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
       caixaId: activeCaixaId,
@@ -1974,11 +3385,18 @@ export default function App() {
       adminFeeAmount,
       adminFeePercent,
       paidPeriods: [],
-      hasDeposit: newRentHasDeposit,
-      depositMonthsCount: newRentHasDeposit ? newRentDepositMonths : undefined,
-      depositAmount: newRentHasDeposit ? (parseFormattedVal(newRentDepositAmountStr) || (rentAmount * newRentDepositMonths)) : undefined,
-      depositStartDate: newRentHasDeposit ? (newRentDepositStartDate || getLocalDateInputValue()) : undefined,
-      depositInterestRate: newRentHasDeposit ? (parseCurrencyInput(newRentDepositInterestRateStr) || 0.5) : undefined
+      adjustmentMode: adjustmentAmount > 0 ? adjustmentMode : undefined,
+      adjustmentAmount: adjustmentAmount > 0 ? adjustmentAmount : undefined,
+      adjustmentReason: adjustmentAmount > 0 ? adjustmentReason : undefined,
+      guaranteeType: newRentGuaranteeType,
+      guarantorName: isFiador ? newRentGuarantorName.trim() : undefined,
+      guarantorPhone: isFiador ? newRentGuarantorPhone.trim() : undefined,
+      guarantorCpf: isFiador ? newRentGuarantorCpf.trim() : undefined,
+      hasDeposit: isCaucao,
+      depositMonthsCount: isCaucao ? newRentDepositMonths : undefined,
+      depositAmount: isCaucao ? (parseFormattedVal(newRentDepositAmountStr) || (rentAmount * newRentDepositMonths)) : undefined,
+      depositStartDate: isCaucao ? (newRentDepositStartDate || getLocalDateInputValue()) : undefined,
+      depositInterestRate: isCaucao ? (parseCurrencyInput(newRentDepositInterestRateStr) || 0.5) : undefined
     };
 
     setRentals(prev => [newRental, ...prev]);
@@ -1986,7 +3404,7 @@ export default function App() {
     // Add log entry
     addLogEntry(
       "cadastro_aluguel",
-      `Novo imóvel cadastrado sob o código ${newRental.lfCode} para o inquilino "${newRental.tenantName}" com aluguel base de R$ ${newRental.rentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.${newRental.hasDeposit ? ` Depósito de caução registrado: R$ ${newRental.depositAmount?.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.` : ""}`
+      `Novo imóvel cadastrado sob o código ${newRental.lfCode} para o inquilino "${newRental.tenantName}" com aluguel base de R$ ${newRental.rentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.${newRental.adjustmentAmount ? ` Ajuste: ${newRental.adjustmentMode === "subtract" ? "-" : "+"}R$ ${newRental.adjustmentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.` : ""}${newRental.hasDeposit ? ` Depósito de caução registrado: R$ ${newRental.depositAmount?.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.` : ""}${isFiador ? ` Fiador: ${newRental.guarantorName || "Sim"}.` : ""}`
     );
 
     // Reset rental form states
@@ -2006,6 +3424,14 @@ export default function App() {
     setNewRentDepositAmountStr("");
     setNewRentDepositStartDate(getLocalDateInputValue());
     setNewRentDepositInterestRateStr("0.5");
+    setNewRentAdjustmentActive(false);
+    setNewRentAdjustmentMode("add");
+    setNewRentAdjustmentAmountStr("");
+    setNewRentAdjustmentReason("");
+    setNewRentGuaranteeType("nenhuma");
+    setNewRentGuarantorName("");
+    setNewRentGuarantorPhone("");
+    setNewRentGuarantorCpf("");
     setShowNewRentForm(false);
 
     alert(`Sucesso! Código ${newRental.lfCode} cadastrado para o inquilino ${newRental.tenantName}.`);
@@ -2037,6 +3463,77 @@ export default function App() {
     }));
   };
 
+  const handleAddAdjustmentToRental = (rentalId: string) => {
+    const amount = parseCurrencyInput(adjFormAmountStr);
+    if (!amount || isNaN(amount) || amount <= 0) {
+      alert("Por favor, informe um valor numérico válido maior que zero.");
+      return;
+    }
+
+    const desc = adjFormDesc.trim() || (adjFormMode === "add" ? "Acréscimo de valor" : "Abatimento / Desconto");
+    const newAdj: RentalItemAdjustment = {
+      id: "adj-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6),
+      mode: adjFormMode,
+      amount,
+      description: desc,
+      recurrence: adjFormRecurrence,
+      targetPeriod: adjFormRecurrence === "pontual" ? activePeriodStr : undefined,
+      createdAt: new Date().toISOString()
+    };
+
+    setRentals(prev => prev.map(r => {
+      if (r.id === rentalId) {
+        const existing: RentalItemAdjustment[] = r.adjustments && Array.isArray(r.adjustments) ? [...r.adjustments] : [];
+        if (r.adjustmentAmount && r.adjustmentAmount > 0 && existing.length === 0) {
+          existing.push({
+            id: "legacy-adj-" + r.id,
+            mode: r.adjustmentMode || "add",
+            amount: r.adjustmentAmount,
+            description: r.adjustmentReason || "Ajuste de valor",
+            recurrence: "fixo"
+          });
+        }
+        const updated: RentalProperty = {
+          ...r,
+          adjustments: [...existing, newAdj],
+          adjustmentAmount: undefined,
+          adjustmentReason: undefined
+        };
+        if (managingAdjustmentsRental && managingAdjustmentsRental.id === rentalId) {
+          setManagingAdjustmentsRental(updated);
+        }
+        return updated;
+      }
+      return r;
+    }));
+
+    addLogEntry(
+      "ajuste_aluguel",
+      `Novo ajuste no imóvel (ID ${rentalId}): ${adjFormMode === "add" ? "Acréscimo" : "Abatimento"} de R$ ${amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} (${desc}) - ${adjFormRecurrence === "pontual" ? `Pontual para ${formatPeriodBRL(activePeriodStr)}` : "Fixo mensal"}.`
+    );
+
+    setAdjFormAmountStr("");
+    setAdjFormDesc("");
+  };
+
+  const handleRemoveAdjustmentFromRental = (rentalId: string, adjId: string) => {
+    setRentals(prev => prev.map(r => {
+      if (r.id === rentalId) {
+        const existing: RentalItemAdjustment[] = r.adjustments && Array.isArray(r.adjustments) ? [...r.adjustments] : [];
+        const filtered = existing.filter(a => a.id !== adjId);
+        const updated: RentalProperty = {
+          ...r,
+          adjustments: filtered
+        };
+        if (managingAdjustmentsRental && managingAdjustmentsRental.id === rentalId) {
+          setManagingAdjustmentsRental(updated);
+        }
+        return updated;
+      }
+      return r;
+    }));
+  };
+
   const startEditingRental = (rental: RentalProperty) => {
     setEditingRental(rental);
     setEditRentLf(rental.lfCode);
@@ -2055,6 +3552,27 @@ export default function App() {
     setEditRentDepositAmountStr(String(rental.depositAmount ?? 0).replace(".", ","));
     setEditRentDepositStartDate(rental.depositStartDate || getLocalDateInputValue());
     setEditRentDepositInterestRateStr(String(rental.depositInterestRate ?? 0.5).replace(".", ","));
+
+    // Populate Adjustment
+    const hasAdj = !!(rental.adjustmentAmount && rental.adjustmentAmount > 0);
+    setEditRentAdjustmentActive(hasAdj);
+    setEditRentAdjustmentMode(rental.adjustmentMode || "add");
+    setEditRentAdjustmentAmountStr(hasAdj ? String(rental.adjustmentAmount).replace(".", ",") : "");
+    setEditRentAdjustmentReason(rental.adjustmentReason || "");
+
+    // Populate Guarantee
+    const initialGuarantee: "caucao" | "fiador" | "nenhuma" =
+      rental.guaranteeType
+        ? rental.guaranteeType
+        : rental.hasDeposit
+          ? "caucao"
+          : rental.guarantorName
+            ? "fiador"
+            : "nenhuma";
+    setEditRentGuaranteeType(initialGuarantee);
+    setEditRentGuarantorName(rental.guarantorName || "");
+    setEditRentGuarantorPhone(rental.guarantorPhone || "");
+    setEditRentGuarantorCpf(rental.guarantorCpf || "");
   };
 
   const handleSaveEditedRental = () => {
@@ -2084,6 +3602,12 @@ export default function App() {
       return;
     }
 
+    const isCaucao = editRentGuaranteeType === "caucao" || editRentHasDeposit;
+    const isFiador = editRentGuaranteeType === "fiador";
+    const adjustmentAmount = editRentAdjustmentActive ? parseFormattedVal(editRentAdjustmentAmountStr) : 0;
+    const adjustmentMode = editRentAdjustmentMode;
+    const adjustmentReason = editRentAdjustmentActive ? editRentAdjustmentReason.trim() : undefined;
+
     setRentals(prev => prev.map(r => {
       if (r.id === editingRental.id) {
         return {
@@ -2100,11 +3624,18 @@ export default function App() {
           fineAmount,
           adminFeeAmount,
           adminFeePercent,
-          hasDeposit: editRentHasDeposit,
-          depositMonthsCount: editRentHasDeposit ? editRentDepositMonths : undefined,
-          depositAmount: editRentHasDeposit ? (parseFormattedVal(editRentDepositAmountStr) || (rentAmount * editRentDepositMonths)) : undefined,
-          depositStartDate: editRentHasDeposit ? editRentDepositStartDate : undefined,
-          depositInterestRate: editRentHasDeposit ? (parseCurrencyInput(editRentDepositInterestRateStr) || 0.5) : undefined
+          adjustmentMode: adjustmentAmount > 0 ? adjustmentMode : undefined,
+          adjustmentAmount: adjustmentAmount > 0 ? adjustmentAmount : undefined,
+          adjustmentReason: adjustmentAmount > 0 ? adjustmentReason : undefined,
+          guaranteeType: editRentGuaranteeType,
+          guarantorName: isFiador ? editRentGuarantorName.trim() : undefined,
+          guarantorPhone: isFiador ? editRentGuarantorPhone.trim() : undefined,
+          guarantorCpf: isFiador ? editRentGuarantorCpf.trim() : undefined,
+          hasDeposit: isCaucao,
+          depositMonthsCount: isCaucao ? editRentDepositMonths : undefined,
+          depositAmount: isCaucao ? (parseFormattedVal(editRentDepositAmountStr) || (rentAmount * editRentDepositMonths)) : undefined,
+          depositStartDate: isCaucao ? editRentDepositStartDate : undefined,
+          depositInterestRate: isCaucao ? (parseCurrencyInput(editRentDepositInterestRateStr) || 0.5) : undefined
         };
       }
       return r;
@@ -2112,7 +3643,7 @@ export default function App() {
 
     addLogEntry(
       "edicao_aluguel",
-      `Imóvel atualizado: Código ${editRentLf.trim().toUpperCase()} - Inquilino "${editRentTenant.trim()}" editado com sucesso.`
+      `Imóvel atualizado: Código ${editRentLf.trim().toUpperCase()} - Inquilino "${editRentTenant.trim()}" editado com sucesso.${adjustmentAmount > 0 ? ` Ajuste: ${adjustmentMode === "subtract" ? "-" : "+"}R$ ${adjustmentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.` : ""}`
     );
 
     setEditingRental(null);
@@ -2124,18 +3655,24 @@ export default function App() {
       alert("Por favor, digite o nome da categoria.");
       return;
     }
+
+    const normName = formattedName.toLowerCase();
+    if (type === "entrada" && (normName === "aluguéis ativos" || normName === "alugueis ativos" || normName === "aluguel ativo")) {
+      alert("A categoria oficial 'Aluguéis Ativos' já é fixa do sistema e gerencia todos os aluguéis. Não é permitido criar outra categoria para aluguéis.");
+      return;
+    }
     
-    const exists = categories.some(c => c.name.toLowerCase() === formattedName.toLowerCase());
+    const exists = categories.some(c => c.name.toLowerCase() === normName);
     if (exists) {
       alert("Já existe uma categoria cadastrada com este nome.");
       return;
     }
 
     const newCat: Category = {
-      id: `cat-${Date.now()}`,
+      id: `cat-${type === "entrada" ? "in" : "out"}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       name: formattedName,
       type,
-      color
+      color: resolveCategoryColorHex(color, formattedName, type)
     };
 
     setCategories(prev => [...prev, newCat]);
@@ -2153,17 +3690,31 @@ export default function App() {
       return;
     }
     
-    if (formattedNewName.toLowerCase() !== oldName.toLowerCase()) {
-      const exists = categories.some(c => c.id !== id && c.name.toLowerCase() === formattedNewName.toLowerCase());
+    const normNewName = formattedNewName.toLowerCase();
+    const isProtectedRental = cat.id === "cat-in-aluguéis-ativos" || cat.id === "cat-in-alugueis-ativos" || oldName.toLowerCase() === "aluguéis ativos";
+
+    if (isProtectedRental && normNewName !== "aluguéis ativos") {
+      alert("A categoria 'Aluguéis Ativos' é a categoria oficial do sistema para receitas de locação e seu nome não pode ser alterado.");
+      return;
+    }
+
+    if (!isProtectedRental && cat.type === "entrada" && (normNewName === "aluguéis ativos" || normNewName === "alugueis ativos")) {
+      alert("Já existe a categoria oficial 'Aluguéis Ativos'. Não é permitido renomear outra categoria para este nome.");
+      return;
+    }
+
+    if (normNewName !== oldName.toLowerCase()) {
+      const exists = categories.some(c => c.id !== id && c.name.toLowerCase() === normNewName);
       if (exists) {
         alert("Já existe outra categoria cadastrada com este nome.");
         return;
       }
     }
 
+    const cleanColor = resolveCategoryColorHex(newColor, formattedNewName, cat.type);
     setCategories(prev => prev.map(c => {
       if (c.id === id) {
-        return { ...c, name: formattedNewName, color: newColor };
+        return { ...c, name: formattedNewName, color: cleanColor };
       }
       return c;
     }));
@@ -2175,6 +3726,40 @@ export default function App() {
     }
   };
 
+  // Bulk transfer transactions and recurring templates from one category to another
+  const handleBulkTransferCategory = (
+    sourceCatName: string, 
+    targetCatName: string, 
+    selectedTxIds: string[], 
+    transferFixed: boolean
+  ) => {
+    if (!sourceCatName || !targetCatName || sourceCatName === targetCatName) return;
+
+    if (selectedTxIds.length > 0) {
+      setTransactions(prev => prev.map(t => {
+        if (selectedTxIds.includes(t.id)) {
+          return { ...t, category: targetCatName };
+        }
+        return t;
+      }));
+    }
+
+    if (transferFixed) {
+      setFixedTemplates(prev => prev.map(tpl => {
+        if (tpl.category === sourceCatName) {
+          return { ...tpl, category: targetCatName };
+        }
+        return tpl;
+      }));
+    }
+
+    addLogEntry(
+      "TRANSFER_CATEGORY",
+      `Transferência em massa de ${selectedTxIds.length} lançamento(s) de "${sourceCatName}" para "${targetCatName}".`
+    );
+  };
+
+  // Entry point when user clicks delete category button
   const handleDeleteCategory = (id: string) => {
     const cat = categories.find(c => c.id === id);
     if (!cat) return;
@@ -2185,32 +3770,59 @@ export default function App() {
       return;
     }
 
-    const inUseTxs = transactions.some(t => t.category === cat.name);
-    const inUseTpl = fixedTemplates.some(tpl => tpl.category === cat.name);
+    // Open the interactive deletion modal
+    setCategoryModalMode("delete");
+    setCategoryModalSourceId(id);
+    setIsCategoryModalOpen(true);
+  };
 
-    if (inUseTxs || inUseTpl) {
-      if (!confirm(`A categoria "${cat.name}" está em uso por transações ou contas recorrentes. Ao excluí-la, essas transações serão categorizadas como "${cat.type === "entrada" ? "Outras Receitas" : "Outras Despesas"}". Deseja mesmo prosseguir?`)) {
-        return;
-      }
-      const fallback = cat.type === "entrada" ? "Outras Receitas" : "Outras Despesas";
-      
-      // Auto-create fallback if it doesn't exist
-      const fallbackExists = categories.some(c => c.name === fallback);
-      if (!fallbackExists) {
-        // Safe fallback insertion
-        setCategories(prev => [
-          ...prev.filter(c => c.id !== id),
-          { id: `cat-fallback-${Date.now()}`, name: fallback, type: cat.type, color: cat.type === "entrada" ? "bg-slate-400" : "bg-zinc-500" }
-        ]);
-      } else {
-        setCategories(prev => prev.filter(c => c.id !== id));
+  // Execution when user confirms category deletion in modal
+  const handleConfirmDeleteCategory = (
+    categoryId: string, 
+    targetCatName?: string, 
+    selectedTxIds: string[] = [], 
+    transferFixed: boolean = true
+  ) => {
+    const cat = categories.find(c => c.id === categoryId);
+    if (!cat) return;
+
+    // If targetCatName is provided, transfer the records
+    if (targetCatName && targetCatName !== cat.name) {
+      // Reassign selected transactions
+      if (selectedTxIds.length > 0) {
+        setTransactions(prev => prev.map(t => {
+          if (selectedTxIds.includes(t.id)) {
+            return { ...t, category: targetCatName };
+          }
+          return t;
+        }));
       }
 
-      setTransactions(prev => prev.map(t => t.category === cat.name ? { ...t, category: fallback } : t));
-      setFixedTemplates(prev => prev.map(tpl => tpl.category === cat.name ? { ...tpl, category: fallback } : tpl));
-    } else {
-      setCategories(prev => prev.filter(c => c.id !== id));
+      // Reassign fixed templates
+      if (transferFixed) {
+        setFixedTemplates(prev => prev.map(tpl => {
+          if (tpl.category === cat.name) {
+            return { ...tpl, category: targetCatName };
+          }
+          return tpl;
+        }));
+      }
     }
+
+    // Permanently blacklist the deleted category so it never resurrects
+    setDeletedCategories(prev => {
+      const next = Array.from(new Set([...prev, cat.name, cat.id]));
+      localStorage.setItem("caixa_deleted_categories", JSON.stringify(next));
+      return next;
+    });
+
+    // Remove category from active state
+    setCategories(prev => prev.filter(c => c.id !== categoryId));
+
+    addLogEntry(
+      "DELETE_CATEGORY",
+      `Categoria "${cat.name}" excluída definitivamente.${targetCatName ? ` Registros migrados para "${targetCatName}".` : ""}`
+    );
   };
 
   const handleToggleRentalPaid = (rental: RentalProperty) => {
@@ -2220,7 +3832,7 @@ export default function App() {
     const period = `${targetYear}-${targetMonth}`;
 
     const isPaid = rental.paidPeriods.includes(period);
-    const valorAReceber = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+    const valorAReceber = getRentalExpectedAmount(rental, period);
     
     if (isPaid) {
       if (confirm(`Remover confirmação de aluguel recebido para ${rental.tenantName} no período de ${formatPeriodBRL(period)}? A entrada correspondente do caixa será desfeita.`)) {
@@ -2250,9 +3862,9 @@ export default function App() {
           `Recebimento de aluguel desfeito para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente ao período de ${formatPeriodBRL(period)} no valor de R$ ${valorAReceber.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.`
         );
 
-        // Delete associated transaction
-        const targetTxId = `tx-rent-${rental.id}-${period}`;
-        setTransactions(prev => prev.filter(t => t.id !== targetTxId));
+        // Delete associated transactions (including split parts like -part1, -part2)
+        const targetTxPrefix = `tx-rent-${rental.id}-${period}`;
+        setTransactions(prev => prev.filter(t => !t.id.startsWith(targetTxPrefix)));
       }
     } else {
       // Toggle ON: Open the custom check detail modal!
@@ -2271,14 +3883,22 @@ export default function App() {
     receivedDateStr: string,
     receivedAmount: number,
     shortfallTreatment: "pending" | "forgiven",
-    lateFeeTreatment: "suggested" | "waived"
+    lateFeeTreatment: "suggested" | "waived",
+    paymentMethod: string = "pix",
+    observation: string = "",
+    splitPart?: {
+      amount: number;
+      date: string;
+      paymentMethod: string;
+      observation?: string;
+    }
   ) => {
     if (!receivedDateStr) {
       alert("Informe a data efetiva do recebimento.");
       return;
     }
     if (!Number.isFinite(receivedAmount) || receivedAmount <= 0) {
-      alert("Informe o valor realmente recebido da imobiliária.");
+      alert("Informe o valor realmente recebido.");
       return;
     }
 
@@ -2288,9 +3908,11 @@ export default function App() {
       return;
     }
 
-    const valorAReceber = getRentalExpectedAmount(rental);
+    const valorAReceber = getRentalExpectedAmount(rental, period);
     const periodStr = formatPeriodBRL(period);
-    const amountDifference = Number((valorAReceber - receivedAmount).toFixed(2));
+    const hasValidSplit = !!(splitPart && Number.isFinite(splitPart.amount) && splitPart.amount > 0);
+    const totalReceived = hasValidSplit ? Number((receivedAmount + splitPart.amount).toFixed(2)) : receivedAmount;
+    const amountDifference = Number((valorAReceber - totalReceived).toFixed(2));
     const { dueDate, graceDate } = getRentalPeriodDates(period, rental.dueDay);
     const due = new Date(`${dueDate}T12:00:00`);
     const grace = new Date(`${graceDate}T12:00:00`);
@@ -2304,10 +3926,33 @@ export default function App() {
       ? (shortfallTreatment === "pending" ? "pending" : "forgiven")
       : "charged";
 
+    const parts: RentalPaymentPart[] = [];
+    const part1TxId = hasValidSplit ? `tx-rent-${rental.id}-${period}-part1` : `tx-rent-${rental.id}-${period}`;
+    parts.push({
+      id: `part-1-${Date.now()}`,
+      amount: receivedAmount,
+      date: receivedDateStr,
+      paymentMethod,
+      observation: observation.trim(),
+      txId: part1TxId
+    });
+
+    if (hasValidSplit) {
+      const part2TxId = `tx-rent-${rental.id}-${period}-part2`;
+      parts.push({
+        id: `part-2-${Date.now() + 1}`,
+        amount: splitPart!.amount,
+        date: splitPart!.date || receivedDateStr,
+        paymentMethod: splitPart!.paymentMethod,
+        observation: splitPart!.observation?.trim() || "",
+        txId: part2TxId
+      });
+    }
+
     const adjustment: RentalPaymentAdjustment = {
       period,
       expectedAmount: valorAReceber,
-      receivedAmount,
+      receivedAmount: totalReceived,
       difference: amountDifference,
       status: adjustmentStatus,
       dueDate,
@@ -2317,11 +3962,14 @@ export default function App() {
       daysAfterGrace,
       lateFeeStatus,
       createdAt: new Date().toISOString(),
+      paymentMethod,
+      observation: observation.trim(),
+      parts,
       note: amountDifference > 0
-        ? (adjustmentStatus === "pending" ? "Diferença anexada ao próximo mês para cobrança da imobiliária." : "Diferença aliviada no fechamento.")
+        ? (adjustmentStatus === "pending" ? "Diferença anexada para quitação posterior ou no próximo mês." : "Diferença aliviada no fechamento.")
         : amountDifference < 0
           ? "Recebimento acima do valor esperado."
-          : "Recebimento integral."
+          : hasValidSplit ? "Aluguel totalmente quitado em 2 formas de pagamento." : "Recebimento integral."
     };
 
     // Toggle ON with stored date
@@ -2332,11 +3980,11 @@ export default function App() {
           paidPeriods: Array.from(new Set([...r.paidPeriods, period])),
           paymentDates: {
             ...(r.paymentDates || {}),
-            [period]: receivedDateStr
+            [period]: hasValidSplit && splitPart!.date ? splitPart!.date : receivedDateStr
           },
           paymentAmounts: {
             ...(r.paymentAmounts || {}),
-            [period]: receivedAmount
+            [period]: totalReceived
           },
           paymentAdjustments: {
             ...(r.paymentAdjustments || {}),
@@ -2347,7 +3995,7 @@ export default function App() {
       return r;
     }));
 
-    // Create transaction with full breakdown details in description
+    // Details for description
     const details = [];
     if (rental.rentAmount > 0) details.push(`Aluguel: R$${rental.rentAmount}`);
     if (rental.waterAmount > 0) details.push(`Água: R$${rental.waterAmount}`);
@@ -2355,47 +4003,234 @@ export default function App() {
     if (rental.garbageAmount > 0) details.push(`Lixo: R$${rental.garbageAmount}`);
     if (rental.lightAmount > 0) details.push(`Luz: R$${rental.lightAmount}`);
     if (rental.fineAmount > 0) details.push(`Multa: R$${rental.fineAmount}`);
+    const applicableAdjs = getRentalApplicableAdjustments(rental, period);
+    if (applicableAdjs.length > 0) {
+      applicableAdjs.forEach(adj => {
+        details.push(
+          adj.mode === "subtract"
+            ? `Abatimento: -R$${adj.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}${adj.description ? ` (${adj.description})` : ""}`
+            : `Acréscimo: +R$${adj.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}${adj.description ? ` (${adj.description})` : ""}`
+        );
+      });
+    } else if (rental.adjustmentAmount && rental.adjustmentAmount > 0) {
+      details.push(
+        rental.adjustmentMode === "subtract"
+          ? `Abatimento: -R$${rental.adjustmentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}${rental.adjustmentReason ? ` (${rental.adjustmentReason})` : ""}`
+          : `Acréscimo: +R$${rental.adjustmentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}${rental.adjustmentReason ? ` (${rental.adjustmentReason})` : ""}`
+      );
+    }
     if (rental.adminFeeAmount > 0) details.push(`Tx Adm: -R$${rental.adminFeeAmount}`);
 
-    let delayText = "";
-    if (daysAfterDue === 0) {
-      delayText = "No vencimento";
-    } else if (daysAfterDue < 0) {
-      delayText = `Adiantado ${Math.abs(daysAfterDue)} dias`;
+    const method1Label = getRentalPaymentMethodLabel(paymentMethod);
+    const date1BRL = receivedDateStr.split("-").reverse().join("/");
+
+    // Create transaction(s)
+    const newTxs: Transaction[] = [];
+
+    if (hasValidSplit) {
+      const method2Label = getRentalPaymentMethodLabel(splitPart!.paymentMethod);
+      const date2BRL = (splitPart!.date || receivedDateStr).split("-").reverse().join("/");
+
+      newTxs.push({
+        id: part1TxId,
+        caixaId: rental.caixaId || activeCaixaId,
+        date: receivedDateStr,
+        description: `[Aluguel ${rental.lfCode}] ${rental.tenantName} - 1ª Parte Ref. ${periodStr} (${details.join(", ")}) [Rec: ${date1BRL} via ${method1Label}]${observation.trim() ? ` - Obs: ${observation.trim()}` : ""}`,
+        amount: receivedAmount,
+        type: "entrada",
+        category: resolveCategoryForType("Aluguéis Ativos", "entrada"),
+        paymentMethod: paymentMethod as any
+      });
+
+      newTxs.push({
+        id: `tx-rent-${rental.id}-${period}-part2`,
+        caixaId: rental.caixaId || activeCaixaId,
+        date: splitPart!.date || receivedDateStr,
+        description: `[Aluguel ${rental.lfCode}] ${rental.tenantName} - 2ª Parte Ref. ${periodStr} [Rec: ${date2BRL} via ${method2Label}]${splitPart!.observation?.trim() ? ` - Obs: ${splitPart!.observation.trim()}` : ""}`,
+        amount: splitPart!.amount,
+        type: "entrada",
+        category: resolveCategoryForType("Aluguéis Ativos", "entrada"),
+        paymentMethod: splitPart!.paymentMethod as any
+      });
+
+      setTransactions(prev => [...newTxs, ...prev]);
+
+      const obs1Text = observation.trim() ? ` (Obs: ${observation.trim()})` : "";
+      const obs2Text = splitPart!.observation?.trim() ? ` (Obs: ${splitPart!.observation.trim()})` : "";
+
+      addLogEntry(
+        "reconciliacao_confirmar",
+        `Parte do aluguel pago no dia ${date1BRL} (R$ ${receivedAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} via ${method1Label}${obs1Text}) e segunda parte paga no dia ${date2BRL} (R$ ${splitPart!.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} via ${method2Label}${obs2Text}) para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente a ${periodStr}. Total quitado: R$ ${totalReceived.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.`,
+        totalReceived
+      );
     } else {
-      delayText = `Atrasado ${daysAfterDue} dias`;
+      const delayText = daysAfterDue === 0 ? "No vencimento" : daysAfterDue < 0 ? `Adiantado ${Math.abs(daysAfterDue)} dias` : `Atrasado ${daysAfterDue} dias`;
+      const differenceText = amountDifference > 0
+        ? `Saldo devedor restante: R$ ${amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
+        : amountDifference < 0
+          ? `Recebido a mais: R$ ${Math.abs(amountDifference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
+          : "Valor recebido integral";
+
+      newTxs.push({
+        id: part1TxId,
+        caixaId: rental.caixaId || activeCaixaId,
+        date: receivedDateStr,
+        description: `[Aluguel ${rental.lfCode}] ${rental.tenantName} - Ref. ${periodStr} (${details.join(", ")}) [Rec: ${date1BRL} via ${method1Label} - ${delayText}; ${differenceText}]${observation.trim() ? ` - Obs: ${observation.trim()}` : ""}`,
+        amount: receivedAmount,
+        type: "entrada",
+        category: resolveCategoryForType("Aluguéis Ativos", "entrada"),
+        paymentMethod: paymentMethod as any
+      });
+
+      setTransactions(prev => [...newTxs, ...prev]);
+
+      const obsText = observation.trim() ? ` - Obs: ${observation.trim()}` : "";
+      addLogEntry(
+        "reconciliacao_confirmar",
+        amountDifference > 0
+          ? `1ª parte do aluguel paga no dia ${date1BRL} (R$ ${receivedAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} via ${method1Label}) para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente a ${periodStr}. Saldo devedor restante: R$ ${amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.${obsText}`
+          : `Aluguel conciliado para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente a ${periodStr}. Recebido em ${date1BRL} via ${method1Label}. Esperado: R$ ${valorAReceber.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}; recebido: R$ ${receivedAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.${obsText}`,
+        receivedAmount
+      );
     }
 
-    const graceText = daysAfterGrace > 0
-      ? `Repasse passou ${daysAfterGrace} ${daysAfterGrace === 1 ? "dia" : "dias"} da tolerância de 2 dias`
-      : "Dentro da tolerância de 2 dias da imobiliária";
-    const differenceText = amountDifference > 0
-      ? `Diferença a cobrar: R$ ${amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
-      : amountDifference < 0
-        ? `Recebido a mais: R$ ${Math.abs(amountDifference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
-        : "Valor recebido integral";
+    resetReceiptConfirmation();
+  };
 
+  const handleConfirmRentalShortfallPayment = (
+    rental: RentalProperty,
+    period: string,
+    part2DateStr: string,
+    part2Amount: number,
+    part2PaymentMethod: string,
+    part2Observation: string
+  ) => {
+    if (!part2DateStr) {
+      alert("Informe a data do recebimento da 2ª parte.");
+      return;
+    }
+    if (!Number.isFinite(part2Amount) || part2Amount <= 0) {
+      alert("Informe o valor recebido na 2ª parte.");
+      return;
+    }
+
+    const currentAdj = rental.paymentAdjustments?.[period];
+    const prevReceived = rental.paymentAmounts?.[period] ?? currentAdj?.receivedAmount ?? 0;
+    const newTotalReceived = Number((prevReceived + part2Amount).toFixed(2));
+    const expected = currentAdj?.expectedAmount ?? getRentalExpectedAmount(rental, period);
+    const newDifference = Number(Math.max(0, expected - newTotalReceived).toFixed(2));
+    const newStatus: RentalPaymentAdjustment["status"] = newDifference <= 0.01 ? "charged" : "pending";
+
+    const part2TxId = `tx-rent-${rental.id}-${period}-part2-${Date.now()}`;
+    const part2: RentalPaymentPart = {
+      id: "part-2-" + Date.now(),
+      amount: part2Amount,
+      date: part2DateStr,
+      paymentMethod: part2PaymentMethod,
+      observation: part2Observation.trim(),
+      txId: part2TxId
+    };
+
+    const existingParts: RentalPaymentPart[] = currentAdj?.parts && currentAdj.parts.length > 0
+      ? [...currentAdj.parts]
+      : [{
+          id: "part-1-orig",
+          amount: prevReceived,
+          date: currentAdj?.receivedDate || rental.paymentDates?.[period] || getLocalDateInputValue(),
+          paymentMethod: currentAdj?.paymentMethod || "dinheiro",
+          observation: currentAdj?.observation || ""
+        }];
+
+    const updatedParts = [...existingParts, part2];
+    const periodStr = formatPeriodBRL(period);
+
+    // Create 2nd part transaction in Caixa
+    const part2MethodLabel = getRentalPaymentMethodLabel(part2PaymentMethod);
+    const part2DateBRL = part2DateStr.split("-").reverse().join("/");
     const newTx: Transaction = {
-      id: `tx-rent-${rental.id}-${period}`,
+      id: part2TxId,
       caixaId: rental.caixaId || activeCaixaId,
-      date: receivedDateStr,
-      description: `[Aluguel ${rental.lfCode}] ${rental.tenantName} - Ref. ${periodStr} (${details.join(", ")}) [Rec: ${receivedDateStr.split("-").reverse().join("/")} - ${delayText}; ${graceText}; ${differenceText}]`,
-      amount: receivedAmount,
+      date: part2DateStr,
+      description: `[Aluguel ${rental.lfCode}] ${rental.tenantName} - 2ª Parte Ref. ${periodStr} [Rec: ${part2DateBRL} via ${part2MethodLabel}]${part2Observation.trim() ? ` - Obs: ${part2Observation.trim()}` : ""}`,
+      amount: part2Amount,
       type: "entrada",
-      category: resolveCategoryForType("Aluguéis Ativos", "entrada")
+      category: resolveCategoryForType("Aluguéis Ativos", "entrada"),
+      paymentMethod: part2PaymentMethod as any
     };
 
     setTransactions(prev => [newTx, ...prev]);
 
-    // Add log entry
+    // Update rental record
+    setRentals(prev => prev.map(r => {
+      if (r.id === rental.id) {
+        const updatedAdj: RentalPaymentAdjustment = {
+          ...(currentAdj || {
+            period,
+            expectedAmount: expected,
+            dueDate: "",
+            graceDate: "",
+            daysAfterDue: 0,
+            daysAfterGrace: 0,
+            lateFeeStatus: "none",
+            createdAt: new Date().toISOString()
+          }),
+          receivedAmount: newTotalReceived,
+          difference: newDifference,
+          status: newStatus,
+          parts: updatedParts,
+          note: newDifference <= 0.01
+            ? "Aluguel totalmente quitado em 2 partes."
+            : `2ª parte recebida. Saldo restante: R$ ${newDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}.`
+        };
+
+        return {
+          ...r,
+          paymentDates: {
+            ...(r.paymentDates || {}),
+            [period]: part2DateStr
+          },
+          paymentAmounts: {
+            ...(r.paymentAmounts || {}),
+            [period]: newTotalReceived
+          },
+          paymentAdjustments: {
+            ...(r.paymentAdjustments || {}),
+            [period]: updatedAdj
+          }
+        };
+      }
+      return r;
+    }));
+
+    // Add audit log entry with exact format requested:
+    const part1 = existingParts[0];
+    const part1DateBRL = part1?.date ? part1.date.split("-").reverse().join("/") : "data inicial";
+    const part1AmountFormatted = part1?.amount ? `R$ ${part1.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}` : "";
+    const part1MethodLabel = getRentalPaymentMethodLabel(part1?.paymentMethod);
+    const obsText = part2Observation.trim() ? ` - Observação: ${part2Observation.trim()}` : "";
+
     addLogEntry(
-      "reconciliacao_confirmar",
-      `Aluguel conciliado para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente a ${periodStr}. Recebido em ${receivedDateStr.split("-").reverse().join("/")} (${delayText}; ${graceText}). Esperado: R$ ${valorAReceber.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}; recebido: R$ ${receivedAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}; ${differenceText}.`,
-      receivedAmount
+      "reconciliacao_segunda_parte",
+      `Parte do aluguel pago no dia ${part1DateBRL} (${part1AmountFormatted} via ${part1MethodLabel}) e segunda parte paga no dia ${part2DateBRL} (R$ ${part2Amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} via ${part2MethodLabel}) para o inquilino "${rental.tenantName}" (${rental.lfCode}) referente a ${periodStr}.${obsText}`,
+      part2Amount
     );
 
-    // Reset state
-    resetReceiptConfirmation();
+    // Reset shortfall modal
+    setPayingShortfallRental(null);
+    setPayingShortfallPeriod("");
+    setPayingShortfallAmountInput("");
+    setPayingShortfallDateInput("");
+    setPayingShortfallPaymentMethod("transferencia");
+    setPayingShortfallObservation("");
+  };
+
+  const openPayShortfallModal = (rental: RentalProperty, period: string, difference: number) => {
+    setPayingShortfallRental(rental);
+    setPayingShortfallPeriod(period);
+    setPayingShortfallAmountInput(difference.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    setPayingShortfallDateInput(getLocalDateInputValue());
+    setPayingShortfallPaymentMethod("transferencia");
+    setPayingShortfallObservation("");
   };
 
   const handleResolveRentalDifference = (
@@ -2442,9 +4277,10 @@ export default function App() {
       fixedTemplates,
       rentals,
       categories,
+      creditCards,
       activityLogs,
       includeSaldoAnterior,
-      version: "1.3",
+      version: "1.4",
       exportedAt: new Date().toISOString()
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -2478,6 +4314,9 @@ export default function App() {
           if (Array.isArray(parsed.categories)) {
             setCategories(parsed.categories);
           }
+          if (Array.isArray(parsed.creditCards)) {
+            setCreditCards(parsed.creditCards);
+          }
           if (Array.isArray(parsed.activityLogs)) {
             setActivityLogs(parsed.activityLogs);
           }
@@ -2501,18 +4340,31 @@ export default function App() {
 
   const exportToCSV = () => {
     // Generate CSV for active caixa & period
-    const headers = "Data;Descrição;Subcategoria;Tipo;Valor Recebido;Valor Pago;Caixa\n";
+    const headers = "Data;Descrição;Subcategoria;Tipo;Forma de Pagamento;Cartão;Valor Recebido;Valor Pago;Caixa\n";
     const csvEscape = (value: string | number) => `"${String(value).replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
     const getCaixaNameForExport = (caixaId?: string) => caixas.find(c => c.id === caixaId)?.name || "Sem caixa";
     const rows = filteredTransactions.map(t => {
       const formattedDate = formatDateBRL(t.date);
       const entrada = t.type === "entrada" ? t.amount.toFixed(2).replace(".", ",") : "";
       const saida = t.type === "saida" ? t.amount.toFixed(2).replace(".", ",") : "";
+      const paymentMethodLabel = t.paymentMethod === "pix"
+        ? "PIX"
+        : t.paymentMethod === "cartao_credito"
+        ? "Cartão de Crédito"
+        : t.paymentMethod === "cartao_debito"
+        ? "Cartão de Débito"
+        : t.paymentMethod === "boleto"
+        ? "Boleto"
+        : "Dinheiro";
+      const cardName = t.cardId ? (creditCards.find(c => c.id === t.cardId)?.name || "") : "";
+
       return [
         csvEscape(formattedDate),
         csvEscape(t.description),
         csvEscape(t.category),
         csvEscape(t.type === "entrada" ? "Entrada" : "Saída"),
+        csvEscape(paymentMethodLabel),
+        csvEscape(cardName),
         csvEscape(entrada),
         csvEscape(saida),
         csvEscape(getCaixaNameForExport(t.caixaId))
@@ -2606,36 +4458,64 @@ export default function App() {
       .slice(0, 8);
   }, [transactions]);
 
-  // Clean SVG Dynamic Donut Chart Logic helper
-  const donutRingParts = useMemo(() => {
-    const expensesTotal = categoryStats.filter(s => s.type === "saida").reduce((acc, s) => acc + s.total, 0);
-    if (expensesTotal === 0) return [];
+  // Helper to generate smooth SVG donut rings for any set of values
+  const buildSvgDonutRings = (items: { name: string; total: number; color?: string }[]) => {
+    const totalSum = items.reduce((acc, s) => acc + s.total, 0);
+    if (totalSum === 0) return [];
 
-    let currentAngle = -90; // Start top
-    return categoryStats
-      .filter(s => s.type === "saida")
-      .map(s => {
-        const percentage = s.total / expensesTotal;
-        const angleSize = percentage * 360;
-        const start = currentAngle;
-        currentAngle += angleSize;
+    let currentAngle = -90; // Começa no topo (12h)
+    return items.map(s => {
+      const percentage = s.total / totalSum;
+      const angleSize = percentage * 360;
+      const start = currentAngle;
+      currentAngle += angleSize;
 
-        // Path calculation for a lovely continuous SVG ring
-        const radius = 38;
-        const x1 = 50 + radius * Math.cos((start * Math.PI) / 180);
-        const y1 = 50 + radius * Math.sin((start * Math.PI) / 180);
-        const x2 = 50 + radius * Math.cos((currentAngle * Math.PI) / 180);
-        const y2 = 50 + radius * Math.sin((currentAngle * Math.PI) / 180);
-        const largeArc = angleSize > 180 ? 1 : 0;
+      const radius = 38;
+      const x1 = 50 + radius * Math.cos((start * Math.PI) / 180);
+      const y1 = 50 + radius * Math.sin((start * Math.PI) / 180);
+      const x2 = 50 + radius * Math.cos((currentAngle * Math.PI) / 180);
+      const y2 = 50 + radius * Math.sin((currentAngle * Math.PI) / 180);
+      const largeArc = angleSize > 180 ? 1 : 0;
 
-        const path = `M ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`;
-        return {
-          ...s,
-          path,
-          percentage: (percentage * 100).toFixed(1)
-        };
-      });
+      const isFullCircle = angleSize >= 359.99;
+      const path = isFullCircle
+        ? `M 50 ${50 - radius} A ${radius} ${radius} 0 1 1 49.99 ${50 - radius} Z`
+        : `M ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`;
+
+      return {
+        ...s,
+        path,
+        percentage: (percentage * 100).toFixed(1)
+      };
+    });
+  };
+
+  // 1. Gráfico de Saídas / Despesas
+  const donutRingSaidas = useMemo(() => {
+    const list = categoryStats
+      .filter(s => s.type === "saida" && s.total > 0)
+      .map(s => ({ ...s, color: getCategoryColorHex(s.name) }));
+    return buildSvgDonutRings(list);
   }, [categoryStats]);
+
+  const donutRingParts = donutRingSaidas; // Mantém compatibilidade com referências existentes
+
+  // 2. Gráfico de Entradas / Receitas
+  const donutRingEntradas = useMemo(() => {
+    const list = categoryStats
+      .filter(s => s.type === "entrada" && s.total > 0)
+      .map(s => ({ ...s, color: getCategoryColorHex(s.name) }));
+    return buildSvgDonutRings(list);
+  }, [categoryStats]);
+
+  // 3. Gráfico Misto (Entradas vs Saídas)
+  const donutRingMisto = useMemo(() => {
+    const list = [
+      { name: "Receitas", total: totals.entrada, color: "#10b981" },
+      { name: "Despesas", total: totals.saida, color: "#f43f5e" }
+    ].filter(item => item.total > 0);
+    return buildSvgDonutRings(list);
+  }, [totals.entrada, totals.saida]);
 
   const renderReceiptConfirmModal = () => {
     if (!receiptConfirmingRental || !receiptConfirmingPeriod) return null;
@@ -2759,37 +4639,198 @@ export default function App() {
               </p>
             </div>
 
+            {/* Forma de Pagamento e Observação */}
+            <div className="space-y-1.5">
+              <label className="font-bold text-slate-650 flex items-center justify-between">
+                <span>Forma de Recebimento</span>
+                <span className="text-[10px] text-slate-400 font-normal">
+                  {receiptHasSplitPart ? "1ª Parte" : "Integral / Inicial"}
+                </span>
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {RENTAL_PAYMENT_METHODS.map(m => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setReceiptPaymentMethod(m.id)}
+                    className={`py-1.5 px-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      receiptPaymentMethod === m.id
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
+                        : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+                    }`}
+                  >
+                    <span>{m.icon}</span>
+                    <span className="truncate">{m.label.split(" ")[0]}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="font-bold text-slate-650 flex items-center justify-between">
+                <span>Observação do Recebimento</span>
+                <span className="text-[10px] text-slate-400 font-normal">Opcional</span>
+              </label>
+              <input
+                type="text"
+                value={receiptObservation}
+                onChange={(e) => setReceiptObservation(e.target.value)}
+                placeholder="Ex: Recebido em mãos / PIX chave celular / comprovante arquivado..."
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-indigo-500/30 focus:border-indigo-500 text-xs text-slate-850 shadow-3xs"
+              />
+            </div>
+
             {receiptAmountInput && Math.abs(amountDifference) >= 0.01 && (
-              <div className={`p-3 rounded-xl border ${
+              <div className={`p-3 rounded-2xl border space-y-2.5 ${
                 amountDifference > 0
                   ? "bg-amber-50/70 border-amber-200 text-amber-900"
                   : "bg-sky-50/70 border-sky-200 text-sky-900"
               }`}>
-                <p className="font-bold text-[11px]">
-                  {amountDifference > 0
-                    ? `Recebido a menos: R$ ${amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
-                    : `Recebido a mais: R$ ${Math.abs(amountDifference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
-                </p>
+                <div className="flex items-center justify-between">
+                  <p className="font-bold text-[11px]">
+                    {amountDifference > 0
+                      ? `Recebido a menos: R$ ${amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
+                      : `Recebido a mais: R$ ${Math.abs(amountDifference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
+                  </p>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-white/80 border border-current opacity-80">
+                    {amountDifference > 0 ? "Diferença Pendente" : "Excedente"}
+                  </span>
+                </div>
+
                 {amountDifference > 0 && (
-                  <div className="grid grid-cols-2 gap-2 mt-2">
-                    <button
-                      type="button"
-                      onClick={() => setReceiptShortfallTreatment("pending")}
-                      className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition ${
-                        receiptShortfallTreatment === "pending" ? "bg-amber-600 text-white border-amber-700" : "bg-white text-amber-800 border-amber-200"
-                      }`}
-                    >
-                      Cobrar no próximo mês
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setReceiptShortfallTreatment("forgiven")}
-                      className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition ${
-                        receiptShortfallTreatment === "forgiven" ? "bg-slate-700 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"
-                      }`}
-                    >
-                      Aliviar diferença
-                    </button>
+                  <div className="space-y-2.5 pt-1 border-t border-amber-200/60">
+                    <p className="text-[10.5px] font-semibold text-amber-900 leading-tight">
+                      Como deseja registrar a 2ª parte de R$ {amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}?
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReceiptHasSplitPart(true);
+                          if (!receiptSplitAmountInput) {
+                            setReceiptSplitAmountInput(amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+                          }
+                          if (!receiptSplitDateInput) {
+                            setReceiptSplitDateInput(receiptDateInput || getLocalDateInputValue());
+                          }
+                        }}
+                        className={`py-2 px-2.5 rounded-xl text-[10.5px] font-bold border transition text-center cursor-pointer ${
+                          receiptHasSplitPart
+                            ? "bg-indigo-600 text-white border-indigo-700 shadow-xs"
+                            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                        }`}
+                      >
+                        ⚡ Quitar 2ª Parte Agora
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReceiptHasSplitPart(false)}
+                        className={`py-2 px-2.5 rounded-xl text-[10.5px] font-bold border transition text-center cursor-pointer ${
+                          !receiptHasSplitPart
+                            ? "bg-amber-600 text-white border-amber-700 shadow-xs"
+                            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                        }`}
+                      >
+                        ⏳ Deixar Saldo Devedor
+                      </button>
+                    </div>
+
+                    {receiptHasSplitPart ? (
+                      /* Formulário da 2ª Parte */
+                      <div className="bg-white/90 border border-indigo-200 rounded-xl p-3 space-y-2 mt-2">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+                          <span className="font-bold text-[11px] text-indigo-900">Detalhes da 2ª Parte</span>
+                          <span className="text-[10px] text-indigo-600 font-mono font-bold">
+                            Total: R$ {((receivedAmount || 0) + (parseCurrencyInput(receiptSplitAmountInput) || 0)).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Valor da 2ª Parte (R$)</label>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={receiptSplitAmountInput}
+                              onChange={(e) => setReceiptSplitAmountInput(e.target.value)}
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-mono font-bold text-slate-800 bg-white"
+                              placeholder={amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Data do Pagamento</label>
+                            <input
+                              type="date"
+                              value={receiptSplitDateInput}
+                              onChange={(e) => setReceiptSplitDateInput(e.target.value)}
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 bg-white"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-600 block mb-1">Forma de Pagamento (2ª Parte)</label>
+                          <div className="grid grid-cols-3 gap-1">
+                            {RENTAL_PAYMENT_METHODS.map(m => (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => setReceiptSplitPaymentMethod(m.id)}
+                                className={`py-1 px-1.5 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1 transition cursor-pointer ${
+                                  receiptSplitPaymentMethod === m.id
+                                    ? "bg-indigo-600 text-white border-indigo-600"
+                                    : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+                                }`}
+                              >
+                                <span>{m.icon}</span>
+                                <span className="truncate">{m.label.split(" ")[0]}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Observação da 2ª Parte (Opcional)</label>
+                          <input
+                            type="text"
+                            value={receiptSplitObservation}
+                            onChange={(e) => setReceiptSplitObservation(e.target.value)}
+                            placeholder="Ex: Complemento pago via PIX na conta..."
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-800 bg-white"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      /* Tratamento do Saldo Devedor */
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] text-amber-800">
+                          O saldo restante de <strong>R$ {amountDifference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</strong> ficará registrado como débito em aberto e você poderá quitá-lo a qualquer momento com o botão <em>"Quitar 2ª Parte"</em>.
+                        </p>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          <button
+                            type="button"
+                            onClick={() => setReceiptShortfallTreatment("pending")}
+                            className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition cursor-pointer ${
+                              receiptShortfallTreatment === "pending"
+                                ? "bg-amber-600 text-white border-amber-700"
+                                : "bg-white text-amber-800 border-amber-200"
+                            }`}
+                          >
+                            Deixar Saldo Devedor Ativo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReceiptShortfallTreatment("forgiven")}
+                            className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition cursor-pointer ${
+                              receiptShortfallTreatment === "forgiven"
+                                ? "bg-slate-700 text-white border-slate-800"
+                                : "bg-white text-slate-600 border-slate-200"
+                            }`}
+                          >
+                            Aliviar / Perdoar Diferença
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -2863,13 +4904,23 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   if (!receiptDateInput) return;
+                  const splitPartObj = receiptHasSplitPart && amountDifference > 0 ? {
+                    amount: parseCurrencyInput(receiptSplitAmountInput) || amountDifference,
+                    date: receiptSplitDateInput || receiptDateInput,
+                    paymentMethod: receiptSplitPaymentMethod,
+                    observation: receiptSplitObservation
+                  } : undefined;
+
                   handleConfirmRentalPaidWithDetails(
                     rental,
                     period,
                     receiptDateInput,
                     receivedAmount,
                     receiptShortfallTreatment,
-                    receiptLateFeeTreatment
+                    receiptLateFeeTreatment,
+                    receiptPaymentMethod,
+                    receiptObservation,
+                    splitPartObj
                   );
                 }}
                 className="flex-1 py-2 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs"
@@ -3005,10 +5056,10 @@ export default function App() {
 
     const totalExpectedVal = rentals
       .filter(r => !r.caixaId || r.caixaId === activeCaixaId)
-      .reduce((sum, r) => sum + r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount, 0);
+      .reduce((sum, r) => sum + getRentalExpectedAmount(r), 0);
 
     const totalPaidVal = paidList.reduce((sum, { rental }) => {
-      const netVal = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+      const netVal = getRentalExpectedAmount(rental);
       return sum + netVal;
     }, 0);
 
@@ -3230,7 +5281,7 @@ export default function App() {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {paidList.map(({ rental, paidDate, daysDiff }, idx) => {
-                        const netVal = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+                        const netVal = getRentalExpectedAmount(rental);
                         return (
                           <tr key={idx} className="hover:bg-slate-50 font-medium">
                             <td className="px-3 py-2.5 font-bold font-mono text-slate-800">{rental.lfCode}</td>
@@ -3422,6 +5473,30 @@ export default function App() {
             <Database size={10} /> Local
           </span>
 
+          {/* Version & Update Indicator Badge */}
+          <button
+            type="button"
+            onClick={() => checkForUpdates(false, true)}
+            title="Verificar atualizações no repositório GitHub (caixaatt)"
+            className={`text-[9px] sm:text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1.5 transition cursor-pointer select-none ${
+              updateInfo?.hasUpdate
+                ? "bg-emerald-500/25 border-emerald-400/50 text-emerald-300 font-extrabold hover:bg-emerald-500/35 ring-1 ring-emerald-400/30"
+                : "bg-white/10 border-white/5 text-slate-300 hover:bg-white/15"
+            }`}
+          >
+            {updateInfo?.hasUpdate ? (
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                <span>v{updateInfo.currentVersion} • Nova v{updateInfo.latestVersion}!</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw size={9} className={isCheckingUpdate ? "animate-spin text-indigo-300" : "text-slate-400"} />
+                <span>v{updateInfo?.currentVersion || "1.0.7"}</span>
+              </>
+            )}
+          </button>
+
           {isGoogleConnected ? (
             <div className="flex items-center gap-1.5 ml-1 sm:ml-2 border-l border-white/20 pl-2 sm:pl-3">
               {syncStatus === "syncing" && (
@@ -3497,6 +5572,15 @@ export default function App() {
             </div>
           )}
 
+          <button 
+            onClick={() => handleLoadDemoData(true)} 
+            title="Carregar dados fictícios completos para teste (2026, aluguéis LF01 a LF04, cartões, despesas fixas)"
+            className="bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold py-1 px-2.5 rounded-lg flex items-center gap-1.5 cursor-pointer shadow-sm transition text-[10px] sm:text-[11px] active:scale-95"
+          >
+            <Sparkles size={12} className="text-amber-200" />
+            <span>Dados de Demonstração</span>
+          </button>
+
           <label className="cursor-pointer hover:text-white transition flex items-center gap-1">
             <Upload size={13} />
             <span className="hidden sm:inline">Importar Backup</span>
@@ -3505,6 +5589,15 @@ export default function App() {
           <button onClick={exportToJSON} className="hover:text-white transition flex items-center gap-1 cursor-pointer">
             <Download size={13} />
             <span className="hidden sm:inline">Exportar Backup</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => checkForUpdates(false, true)}
+            title="Buscar atualizações no GitHub (caixaatt)"
+            className="text-[10px] sm:text-[11px] hover:text-white transition flex items-center gap-1 text-slate-300 cursor-pointer"
+          >
+            <RefreshCw size={11} className={isCheckingUpdate ? "animate-spin text-indigo-400" : ""} />
+            <span className="hidden sm:inline">Atualizações</span>
           </button>
           <button 
             onClick={() => setIsResetConfirmOpen(true)}
@@ -3519,6 +5612,72 @@ export default function App() {
       {/* Main Container */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
         
+        {/* APP UPDATE NOTIFICATION BANNER */}
+        <AnimatePresence>
+          {showUpdateBanner && updateInfo?.hasUpdate && (
+            <motion.div
+              initial={{ opacity: 0, y: -15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, height: 0, margin: 0 }}
+              transition={{ duration: 0.25 }}
+              className="mb-8 rounded-3xl border border-emerald-300/80 bg-gradient-to-r from-emerald-600 via-teal-700 to-indigo-800 text-white p-5 shadow-lg overflow-hidden relative"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-start sm:items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-white/20 backdrop-blur-md flex items-center justify-center shrink-0 shadow-inner border border-white/20">
+                    <Sparkles size={24} className="text-amber-300 animate-pulse" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2.5 flex-wrap">
+                      <h4 className="font-black text-base tracking-tight">Nova Atualização Disponível!</h4>
+                      <span className="bg-white/25 text-white text-[10px] font-mono font-extrabold px-2.5 py-0.5 rounded-full border border-white/20">
+                        v{updateInfo.latestVersion}
+                      </span>
+                      {updateInfo.isSimulated && (
+                        <span className="bg-amber-400/30 text-amber-200 text-[10px] uppercase font-bold px-2 py-0.5 rounded-full">
+                          Modo Demonstração
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-emerald-100/90 mt-1 leading-relaxed">
+                      {updateInfo.releaseName}. Uma nova versão foi publicada no repositório com melhorias e correções. Você pode verificar as mudanças antes de atualizar.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleSnoozeUpdate}
+                    className="px-3.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-bold transition cursor-pointer"
+                    title="Lembrar mais tarde (24h)"
+                  >
+                    Lembrar Mais Tarde
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsUpdateModalOpen(true)}
+                    className="px-4 py-2 rounded-xl bg-white text-emerald-950 hover:bg-emerald-50 text-xs font-black shadow-md transition cursor-pointer flex items-center gap-1.5 transform active:scale-95"
+                  >
+                    <span>Ver Mudanças e Atualizar</span>
+                    <ChevronRight size={14} className="stroke-[3]" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowUpdateBanner(false)}
+                    className="p-2 rounded-xl text-white/70 hover:text-white hover:bg-white/15 transition cursor-pointer"
+                    title="Fechar este aviso"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* RENTAL DUE ALERTS BANNER (REPOSITIONED TO THE TOP - VERY EYE-CATCHING AND PRESTINE) */}
         <AnimatePresence>
           {rentDueAlerts.totalCount > 0 && !hideAlertsBanner && (() => {
@@ -4122,111 +6281,129 @@ export default function App() {
 
             </div>
 
-            {/* Category selection and suggestions Row */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center mb-6">
-              
-              {/* Category Dropdown Selector */}
-              <div className="md:col-span-5 relative">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block select-none">
-                  Categoria
-                </label>
-                
-                <div ref={categoryDropdownRef} className="relative">
-                  <button
-                    onClick={() => setIsCategoryDropdownOpen(!isCategoryDropdownOpen)}
-                    className="w-full bg-slate-50 border border-slate-200 hover:border-slate-350 rounded-xl px-4 py-3 text-sm text-slate-700 flex items-center justify-between outline-none transition text-left"
-                  >
-                    <span className="flex items-center gap-2">
-                      {(() => {
-                        const colorVal = getCategoryBgColor(formCategory);
-                        const isHex = colorVal.startsWith("#");
-                        return (
-                          <span 
-                            className={`h-2.5 w-2.5 rounded-full ${!isHex ? colorVal : ""}`}
-                            style={isHex ? { backgroundColor: colorVal } : undefined}
-                          ></span>
-                        );
-                      })()}
-                      {formCategory}
-                    </span>
-                    <ChevronRight size={14} className={`transform transition duration-200 ${isCategoryDropdownOpen ? "rotate-90" : ""}`} />
-                  </button>
-
-                  <AnimatePresence>
-                    {isCategoryDropdownOpen && (
-                      <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-55 p-2">
-                        <div className="p-1 mb-1 border-b border-slate-100 text-[10px] font-bold text-emerald-600 uppercase tracking-wider select-none">
-                          Categorias de Entrada
-                        </div>
-                        {categories.filter(c => c.type === "entrada").map(cat => (
-                          <button
-                            key={cat.id}
-                            onClick={() => {
-                              setFormCategory(cat.name);
-                              setIsCategoryDropdownOpen(false);
-                            }}
-                            className="w-full text-left px-3 py-1.5 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-2"
-                          >
-                            <span className={`h-2 w-2 rounded-full ${cat.color}`}></span>
-                            {cat.name}
-                          </button>
-                        ))}
-
-                        <div className="p-1 mt-2 mb-1 border-b border-slate-100 text-[10px] font-bold text-rose-500 uppercase tracking-wider select-none">
-                          Categorias de Saída
-                        </div>
-                        {categories.filter(c => c.type === "saida").map(cat => (
-                          <button
-                            key={cat.id}
-                            onClick={() => {
-                              setFormCategory(cat.name);
-                              setIsCategoryDropdownOpen(false);
-                            }}
-                            className="w-full text-left px-3 py-1.5 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-2"
-                          >
-                            <span className={`h-2 w-2 rounded-full ${cat.color}`}></span>
-                            {cat.name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
-
-              {/* Suggestions */}
-              <div className="md:col-span-7 select-none">
+            {/* Quick Suggestions Row */}
+            {quickTemplateSuggestions.length > 0 && (
+              <div className="mb-6 select-none bg-slate-50/50 p-3 rounded-xl border border-slate-100">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
                   Sugestões frequentes:
                 </span>
                 <div className="flex flex-wrap gap-1.5">
-                  {quickTemplateSuggestions.length > 0 ? (
-                    quickTemplateSuggestions.map((item, index) => (
-                      <button
-                        key={index}
-                        type="button"
-                        onClick={() => {
-                          setFormDescription(item.description);
-                          setFormCategory(item.lastCategory);
-                          setFormAmountStr(item.lastAmount > 0 ? item.lastAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "");
-                        }}
-                        title={`Clique para preencher.\nÚltimo: R$ ${item.lastAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} na categoria ${item.lastCategory} (${item.count} ocorrescência(s))`}
-                        className={`text-[11px] border bg-white px-2.5 py-1.5 rounded-lg transition duration-150 flex items-center gap-1.5 cursor-pointer shadow-3xs ${
-                          item.lastType === "entrada"
-                            ? "border-emerald-100 hover:border-emerald-300 hover:bg-emerald-50/50 text-slate-700 hover:text-emerald-800"
-                            : "border-slate-100 hover:border-rose-200 hover:bg-rose-50/50 text-slate-700 hover:text-rose-800"
-                        }`}
-                      >
-                        <span className={`h-1.5 w-1.5 rounded-full ${item.lastType === "entrada" ? "bg-emerald-500" : "bg-rose-500"} flex-shrink-0`}></span>
-                        <span className="font-semibold">{item.description}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <span className="text-xs text-slate-400 italic font-mono">Nenhum histórico disponível</span>
-                  )}
+                  {quickTemplateSuggestions.map((item, index) => (
+                    <button
+                      key={index}
+                      type="button"
+                      onClick={() => {
+                        setFormDescription(item.description);
+                        setFormCategory(item.lastCategory);
+                        setFormAmountStr(item.lastAmount > 0 ? item.lastAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "");
+                      }}
+                      title={`Clique para preencher.\nÚltimo: R$ ${item.lastAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} na categoria ${item.lastCategory} (${item.count} ocorrência(s))`}
+                      className={`text-[11px] border bg-white px-2.5 py-1.5 rounded-lg transition duration-150 flex items-center gap-1.5 cursor-pointer shadow-3xs ${
+                        item.lastType === "entrada"
+                          ? "border-emerald-100 hover:border-emerald-300 hover:bg-emerald-50/50 text-slate-700 hover:text-emerald-800"
+                          : "border-slate-100 hover:border-rose-200 hover:bg-rose-50/50 text-slate-700 hover:text-rose-800"
+                      }`}
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full ${item.lastType === "entrada" ? "bg-emerald-500" : "bg-rose-500"} flex-shrink-0`}></span>
+                      <span className="font-semibold">{item.description}</span>
+                    </button>
+                  ))}
                 </div>
               </div>
+            )}
 
+            {/* Forma de Pagamento Selector Row */}
+            <div className="mb-6 p-4 bg-slate-50/80 border border-slate-200/70 rounded-2xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2.5">
+                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5 select-none">
+                  <CreditCardIcon size={14} className="text-indigo-600" />
+                  Forma de Pagamento
+                </label>
+                {formPaymentMethod === "cartao_credito" && (
+                  <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
+                    Entra na fatura de acordo com o fechamento do cartão
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { id: "dinheiro", label: "Dinheiro", icon: "💵" },
+                  { id: "pix", label: "PIX", icon: "⚡" },
+                  { id: "cartao_credito", label: "Cartão de Crédito", icon: "💳" },
+                  { id: "cartao_debito", label: "Cartão de Débito", icon: "💳" },
+                  { id: "boleto", label: "Boleto", icon: "📄" },
+                  { id: "outros", label: "Outros", icon: "🔄" },
+                ].map(method => (
+                  <button
+                    key={method.id}
+                    type="button"
+                    onClick={() => setFormPaymentMethod(method.id as PaymentMethod)}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                      formPaymentMethod === method.id
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:bg-slate-100/50"
+                    }`}
+                  >
+                    <span>{method.icon}</span>
+                    <span>{method.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Extra details when Cartão de Crédito is selected */}
+              {formPaymentMethod === "cartao_credito" && (
+                <div className="mt-3 pt-3 border-t border-slate-200/60 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                      Selecionar Cartão de Crédito:
+                    </label>
+                    {activeCards.length > 0 ? (
+                      <select
+                        value={formCardId}
+                        onChange={e => setFormCardId(e.target.value)}
+                        className="w-full text-xs font-semibold px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 cursor-pointer"
+                      >
+                        <option value="">Selecione o cartão...</option>
+                        {activeCards.map(card => (
+                          <option key={card.id} value={card.id}>
+                            {card.name} (Vira dia {card.closingDay} • Vence dia {card.dueDay})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="text-xs text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200 flex items-center justify-between">
+                        <span>Nenhum cartão cadastrado.</span>
+                        <button
+                          type="button"
+                          onClick={() => setSubTab("cartoes")}
+                          className="font-bold underline cursor-pointer ml-2"
+                        >
+                          Cadastrar Cartão
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 mb-1">
+                      Parcelamento:
+                    </label>
+                    <select
+                      value={formInstallmentsCount}
+                      onChange={e => setFormInstallmentsCount(parseInt(e.target.value) || 1)}
+                      className="w-full text-xs font-semibold px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none focus:border-indigo-500 cursor-pointer"
+                    >
+                      <option value={1}>À vista (1x)</option>
+                      {[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 18, 24].map(n => (
+                        <option key={n} value={n}>
+                          Parcelado em {n}x {formAmountStr ? `(R$ ${(parseCurrencyInput(formAmountStr) / n).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/mês)` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Form Actions: green Entrada and red Saída exactly like physical button mockups */}
@@ -4251,75 +6428,268 @@ export default function App() {
             </div>
           </div>
 
-          {/* Analytics Overview Column */}
+          {/* Analytics Overview Column - 3 Gráficos: Saídas, Entradas e Misto */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 flex flex-col justify-between">
             <div>
-              <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-3 select-none">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3 border-b border-slate-100 pb-3 select-none">
+                <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                   <PieChart size={16} className="text-indigo-650" />
-                  Divisão de Despesas
+                  Divisão por Categorias
                 </h2>
-                <span className="text-[10px] font-bold uppercase bg-blue-100/70 text-blue-800 px-2 py-0.5 rounded-full">
-                  Mês Atual
+                <span className="text-[10px] font-bold uppercase bg-blue-100/70 text-blue-800 px-2 py-0.5 rounded-full w-max">
+                  {filterMonth !== "todos" ? (monthsList.find(m => m.value === filterMonth)?.label || "Mês Atual") : "Todo Histórico"}
                 </span>
               </div>
 
-              {/* Dynamic SVG Donut Chart */}
-              {donutRingParts.length > 0 ? (
-                <div className="flex items-center gap-4 py-3">
-                  <div className="relative w-28 h-28 flex-shrink-0">
-                    <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-95">
-                      {/* Grey background circle */}
-                      <circle cx="50" cy="50" r="38" fill="none" stroke="#f1f5f9" strokeWidth="8" />
-                      {/* Active category slices */}
-                      {donutRingParts.map((ring, idx) => (
-                        <path
-                          key={idx}
-                          d={ring.path}
-                          fill="none"
-                          stroke={getCategoryColorHex(ring.name)}
-                          strokeWidth="8.5"
-                          strokeLinecap="round"
-                          className="transition duration-300 hover:stroke-[10] cursor-pointer"
-                        />
-                      ))}
-                    </svg>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center select-none">
-                      <span className="text-[10px] font-bold uppercase text-slate-400">Total Saídas</span>
-                      <span className="text-xs font-extrabold text-slate-700">R$ {totals.saida.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
-                    </div>
-                  </div>
+              {/* Seletor dos 3 Gráficos */}
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl mb-4 text-[11px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => setOverviewChartTab("todos")}
+                  className={`flex-1 py-1 px-1.5 rounded-lg transition text-center cursor-pointer ${
+                    overviewChartTab === "todos"
+                      ? "bg-white text-indigo-700 shadow-xs"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Exibir os 3 gráficos simultaneamente"
+                >
+                  3 Gráficos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOverviewChartTab("saidas")}
+                  className={`flex-1 py-1 px-1.5 rounded-lg transition text-center cursor-pointer ${
+                    overviewChartTab === "saidas"
+                      ? "bg-white text-rose-700 shadow-xs"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Gráfico exclusivo de Despesas (Saídas)"
+                >
+                  Saídas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOverviewChartTab("entradas")}
+                  className={`flex-1 py-1 px-1.5 rounded-lg transition text-center cursor-pointer ${
+                    overviewChartTab === "entradas"
+                      ? "bg-white text-emerald-700 shadow-xs"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Gráfico exclusivo de Receitas (Entradas)"
+                >
+                  Entradas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOverviewChartTab("misto")}
+                  className={`flex-1 py-1 px-1.5 rounded-lg transition text-center cursor-pointer ${
+                    overviewChartTab === "misto"
+                      ? "bg-white text-indigo-700 shadow-xs"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Gráfico misto comparativo: Entradas x Saídas"
+                >
+                  Misto
+                </button>
+              </div>
 
-                  {/* Tiny Legend */}
-                  <div className="flex-1 space-y-1.5 max-h-24 overflow-y-auto pr-1">
-                    {donutRingParts.slice(0, 4).map((r, idx) => (
-                      <div key={idx} className="flex justify-between items-center text-[11px]">
-                        <div className="flex items-center gap-1 min-w-0">
-                          {(() => {
-                            const colorVal = getCategoryBgColor(r.name);
-                            const isHex = colorVal.startsWith("#");
-                            return (
-                              <span 
-                                className={`h-2 w-2 rounded-full flex-shrink-0 ${!isHex ? colorVal : ""}`}
-                                style={isHex ? { backgroundColor: colorVal } : undefined}
-                              ></span>
-                            );
-                          })()}
-                          <span className="text-slate-600 truncate font-semibold">{r.name}</span>
+              {/* RENDERIZAÇÃO DOS GRÁFICOS */}
+              <div className="space-y-4">
+                {/* 1. GRÁFICO DE SAÍDAS / DESPESAS */}
+                {(overviewChartTab === "todos" || overviewChartTab === "saidas") && (
+                  <div className={`p-3 rounded-xl border border-slate-100 ${overviewChartTab === "todos" ? "bg-slate-50/60" : "bg-white"}`}>
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-rose-700 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+                        1. Saídas / Despesas
+                      </span>
+                      <span className="font-mono text-xs font-bold text-rose-600">
+                        R$ {totals.saida.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    {donutRingSaidas.length > 0 ? (
+                      <div className="flex items-center gap-3">
+                        <div className="relative w-24 h-24 flex-shrink-0">
+                          <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-95">
+                            <circle cx="50" cy="50" r="38" fill="none" stroke="#f1f5f9" strokeWidth="8" />
+                            {donutRingSaidas.map((ring, idx) => (
+                              <path
+                                key={idx}
+                                d={ring.path}
+                                fill="none"
+                                stroke={getCategoryColorHex(ring.name)}
+                                strokeWidth="8.5"
+                                strokeLinecap="round"
+                                className="transition duration-300 hover:stroke-[10] cursor-pointer"
+                              />
+                            ))}
+                          </svg>
+                          <div className="absolute inset-0 flex flex-col items-center justify-center select-none text-center px-1">
+                            <span className="text-[8px] font-bold uppercase text-slate-400 leading-none">Saídas</span>
+                            <span className="text-[10px] font-extrabold text-slate-700 font-mono mt-0.5">
+                              R$ {totals.saida.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                            </span>
+                          </div>
                         </div>
-                        <span className="font-mono text-slate-500 text-[10px]">{r.percentage}%</span>
+
+                        <div className="flex-1 space-y-1 max-h-24 overflow-y-auto pr-1">
+                          {donutRingSaidas.slice(0, overviewChartTab === "saidas" ? 8 : 4).map((r, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-[10.5px]">
+                              <div className="flex items-center gap-1 min-w-0">
+                                <span 
+                                  className="h-2 w-2 rounded-full flex-shrink-0"
+                                  style={{ backgroundColor: getCategoryColorHex(r.name) }}
+                                ></span>
+                                <span className="text-slate-600 truncate font-semibold" title={r.name}>{r.name}</span>
+                              </div>
+                              <span className="font-mono text-slate-500 text-[9.5px] ml-1">{r.percentage}%</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
+                    ) : (
+                      <div className="py-4 text-center text-xs text-slate-400 italic">
+                        Nenhuma saída registrada no período.
+                      </div>
+                    )}
                   </div>
-                </div>
-              ) : (
-                <div className="py-8 flex flex-col items-center justify-center text-center">
-                  <div className="h-10 w-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-300 mb-2">
-                    <Grid size={18} />
+                )}
+
+                {/* 2. GRÁFICO DE ENTRADAS / RECEITAS */}
+                {(overviewChartTab === "todos" || overviewChartTab === "entradas") && (
+                  <div className={`p-3 rounded-xl border border-slate-100 ${overviewChartTab === "todos" ? "bg-slate-50/60" : "bg-white"}`}>
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                        2. Entradas / Receitas
+                      </span>
+                      <span className="font-mono text-xs font-bold text-emerald-600">
+                        R$ {totals.entrada.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    {donutRingEntradas.length > 0 ? (
+                      <div className="flex items-center gap-3">
+                        <div className="relative w-24 h-24 flex-shrink-0">
+                          <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-95">
+                            <circle cx="50" cy="50" r="38" fill="none" stroke="#f1f5f9" strokeWidth="8" />
+                            {donutRingEntradas.map((ring, idx) => (
+                              <path
+                                key={idx}
+                                d={ring.path}
+                                fill="none"
+                                stroke={getCategoryColorHex(ring.name)}
+                                strokeWidth="8.5"
+                                strokeLinecap="round"
+                                className="transition duration-300 hover:stroke-[10] cursor-pointer"
+                              />
+                            ))}
+                          </svg>
+                          <div className="absolute inset-0 flex flex-col items-center justify-center select-none text-center px-1">
+                            <span className="text-[8px] font-bold uppercase text-slate-400 leading-none">Entradas</span>
+                            <span className="text-[10px] font-extrabold text-slate-700 font-mono mt-0.5">
+                              R$ {totals.entrada.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex-1 space-y-1 max-h-24 overflow-y-auto pr-1">
+                          {donutRingEntradas.slice(0, overviewChartTab === "entradas" ? 8 : 4).map((r, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-[10.5px]">
+                              <div className="flex items-center gap-1 min-w-0">
+                                <span 
+                                  className="h-2 w-2 rounded-full flex-shrink-0"
+                                  style={{ backgroundColor: getCategoryColorHex(r.name) }}
+                                ></span>
+                                <span className="text-slate-600 truncate font-semibold" title={r.name}>{r.name}</span>
+                              </div>
+                              <span className="font-mono text-slate-500 text-[9.5px] ml-1">{r.percentage}%</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-4 text-center text-xs text-slate-400 italic">
+                        Nenhuma entrada registrada no período.
+                      </div>
+                    )}
                   </div>
-                  <p className="text-xs text-slate-400 italic">Nenhuma saída registrada no período para gerar gráficos.</p>
-                </div>
-              )}
+                )}
+
+                {/* 3. GRÁFICO MISTO: ENTRADAS VS SAÍDAS */}
+                {(overviewChartTab === "todos" || overviewChartTab === "misto") && (
+                  <div className={`p-3 rounded-xl border border-slate-100 ${overviewChartTab === "todos" ? "bg-slate-50/60" : "bg-white"}`}>
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-700 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
+                        3. Misto: Entradas x Saídas
+                      </span>
+                      <span className={`font-mono text-xs font-bold ${totals.saldo >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                        Saldo: R$ {totals.saldo.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    {(totals.entrada > 0 || totals.saida > 0) ? (
+                      <div className="flex items-center gap-3">
+                        <div className="relative w-24 h-24 flex-shrink-0">
+                          <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-95">
+                            <circle cx="50" cy="50" r="38" fill="none" stroke="#f1f5f9" strokeWidth="8" />
+                            {donutRingMisto.map((ring, idx) => (
+                              <path
+                                key={idx}
+                                d={ring.path}
+                                fill="none"
+                                stroke={ring.color || (ring.name === "Receitas" ? "#10b981" : "#f43f5e")}
+                                strokeWidth="8.5"
+                                strokeLinecap="round"
+                                className="transition duration-300 hover:stroke-[10] cursor-pointer"
+                              />
+                            ))}
+                          </svg>
+                          <div className="absolute inset-0 flex flex-col items-center justify-center select-none text-center px-1">
+                            <span className="text-[7.5px] font-bold uppercase text-slate-400 leading-none">Saldo Líquido</span>
+                            <span className={`text-[10px] font-extrabold font-mono mt-0.5 ${totals.saldo >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              {totals.saldo >= 0 ? "+" : ""}R$ {totals.saldo.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex-1 space-y-1.5">
+                          <div className="flex justify-between items-center text-[10.5px]">
+                            <div className="flex items-center gap-1">
+                              <span className="h-2 w-2 rounded-full bg-emerald-500 flex-shrink-0"></span>
+                              <span className="text-slate-600 font-semibold">Entradas</span>
+                            </div>
+                            <span className="font-mono font-bold text-emerald-600 text-[10px]">
+                              {((totals.entrada / (totals.entrada + totals.saida || 1)) * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center text-[10.5px]">
+                            <div className="flex items-center gap-1">
+                              <span className="h-2 w-2 rounded-full bg-rose-500 flex-shrink-0"></span>
+                              <span className="text-slate-600 font-semibold">Saídas</span>
+                            </div>
+                            <span className="font-mono font-bold text-rose-600 text-[10px]">
+                              {((totals.saida / (totals.entrada + totals.saida || 1)) * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                          <div className="pt-1 border-t border-slate-100 flex justify-between items-center text-[10px]">
+                            <span className="text-slate-400 font-medium">Movimentado:</span>
+                            <span className="font-mono text-slate-700 font-bold">
+                              R$ {(totals.entrada + totals.saida).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-4 text-center text-xs text-slate-400 italic">
+                        Nenhuma movimentação no período para gerar gráfico misto.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Smart mini financial health box & AI trigger */}
@@ -4372,187 +6742,256 @@ export default function App() {
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-8 overflow-hidden">
           
           {/* Header toolbar for table with Tabs */}
-          <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-6 pb-4 border-b border-slate-100">
-            <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full md:w-auto">
-              <div>
-                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                  <span className="p-1.5 bg-indigo-50 text-indigo-700 rounded-lg"><FileSpreadsheet size={18} /></span>
-                  Controlador Financeiro
-                </h2>
-                <p className="text-xs text-slate-450 mt-0.5">Lançamentos e Recorrências de {activeCaixa.name}</p>
+          <div className="mb-6 space-y-4">
+            
+            {/* Layer 1: Top Bar with Title and Global Quick Report Actions */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center shadow-xs border border-indigo-100/60">
+                  <FileSpreadsheet size={20} />
+                </div>
+                <div>
+                  <h2 className="text-lg sm:text-xl font-black text-slate-800 tracking-tight flex items-center gap-2">
+                    Controlador Financeiro
+                  </h2>
+                  <p className="text-xs text-slate-400 font-medium">
+                    Lançamentos, recorrências e módulos de <span className="text-slate-600 font-semibold">{activeCaixa.name}</span>
+                  </p>
+                </div>
               </div>
 
-              {/* Subtab Buttons */}
-              <div className="flex flex-wrap gap-1.5 bg-slate-50 border border-slate-200/80 p-1.5 rounded-2xl w-fit shadow-2xs">
+              {/* Global Report Actions - Always fixed & predictable on top right */}
+              <div className="flex items-center gap-2 self-start sm:self-auto shrink-0 flex-wrap">
                 <button
                   type="button"
-                  onClick={() => setSubTab("extrato")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "extrato"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
+                  onClick={() => setIsExecutiveReportOpen(true)}
+                  className="px-3 py-2 bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-700 hover:to-indigo-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs hover:shadow"
+                  title="Gerar e imprimir relatório executivo consolidado"
                 >
-                  📋 Extrato de Lançamentos
+                  <Printer size={13} />
+                  <span>Relatório Executivo</span>
                 </button>
+
                 <button
                   type="button"
-                  onClick={() => setSubTab("fixas")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "fixas"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
+                  onClick={() => setIsAccountantReportOpen(true)}
+                  className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs hover:shadow"
+                  title="Gerar dossiê contábil e organizador para contador"
                 >
-                  🔄 Contas e Rendas Fixas
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSubTab("alugueis")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "alugueis"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
-                >
-                  🏢 Contratos de Aluguel (LF)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSubTab("relatorio")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "relatorio"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
-                >
-                  📊 Relatório da Imobiliária
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSubTab("categorias")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "categorias"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
-                >
-                  🏷️ Gerenciar Categorias
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSubTab("logs")}
-                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer tracking-tight flex items-center gap-1.5 ${
-                    subTab === "logs"
-                      ? "bg-white text-indigo-700 shadow-xs border border-slate-200/50"
-                      : "text-slate-500 hover:text-slate-800 hover:bg-slate-200/40"
-                  }`}
-                >
-                  📖 Prontuário & Logs
+                  <FileSpreadsheet size={13} />
+                  <span>Dossiê Contábil / IR</span>
                 </button>
               </div>
             </div>
 
-            {/* Render table header actions only if in extrato tab */}
-            {subTab === "extrato" && (
-              <div className="flex items-center gap-2 w-full md:w-auto">
-                {/* Search Bar */}
-                <div className="relative flex-1 md:w-60">
-                  <Search size={14} className="absolute left-3.5 top-3 pr-0.5 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Pesquisar descrição ou categoria..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-indigo-400 rounded-xl pl-9 pr-4 py-2 text-xs outline-none focus:bg-white transition"
-                  />
-                  {searchQuery && (
-                    <button onClick={() => setSearchQuery("")} className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600">
-                      <X size={12} />
-                    </button>
+            {/* Layer 2: Dedicated Navigation Tabs (Segmented Control style, responsive & clean) */}
+            <div className="overflow-x-auto pb-1.5 scrollbar-none">
+              <div className="inline-flex items-center gap-1.5 bg-slate-100/80 p-1.5 rounded-2xl border border-slate-200/60 min-w-max">
+                <button
+                  type="button"
+                  onClick={() => setSubTab("extrato")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "extrato"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>📋</span>
+                  <span>Extrato de Lançamentos</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-semibold ${
+                    subTab === "extrato" ? "bg-indigo-50 text-indigo-700" : "bg-slate-200 text-slate-600"
+                  }`}>
+                    {filteredTransactions.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("fixas")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "fixas"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>🔄</span>
+                  <span>Contas e Rendas Fixas</span>
+                  {fixedTemplates.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-semibold ${
+                      subTab === "fixas" ? "bg-indigo-50 text-indigo-700" : "bg-slate-200 text-slate-600"
+                    }`}>
+                      {fixedTemplates.length}
+                    </span>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("cartoes")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "cartoes"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>💳</span>
+                  <span>Cartões & Faturas</span>
+                  {creditCards.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-semibold ${
+                      subTab === "cartoes" ? "bg-indigo-50 text-indigo-700" : "bg-slate-200 text-slate-600"
+                    }`}>
+                      {creditCards.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("alugueis")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "alugueis"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>🏢</span>
+                  <span>Contratos de Aluguel (LF)</span>
+                  {rentals.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-semibold ${
+                      subTab === "alugueis" ? "bg-indigo-50 text-indigo-700" : "bg-slate-200 text-slate-600"
+                    }`}>
+                      {rentals.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("relatorio")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "relatorio"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>📊</span>
+                  <span>Relatório da Imobiliária</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("categorias")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "categorias"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>🏷️</span>
+                  <span>Categorias</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSubTab("logs")}
+                  className={`px-4 py-2 text-xs font-bold rounded-xl transition duration-150 select-none cursor-pointer flex items-center gap-2 ${
+                    subTab === "logs"
+                      ? "bg-white text-indigo-700 shadow-sm border border-slate-200/60"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                  }`}
+                >
+                  <span>📖</span>
+                  <span>Prontuário & Logs</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Layer 3: Contextual Action Toolbar (dedicated space for the current active tab) */}
+            {subTab === "extrato" && (
+              <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 pt-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 flex-1">
+                  {/* Search Bar */}
+                  <div className="relative flex-1 max-w-md">
+                    <Search size={14} className="absolute left-3.5 top-3 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Pesquisar descrição ou categoria no extrato..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-indigo-400 rounded-xl pl-9 pr-8 py-2 text-xs outline-none focus:bg-white transition"
+                    />
+                    {searchQuery && (
+                      <button onClick={() => setSearchQuery("")} className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600">
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Filter Payment Method */}
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={filterPaymentMethod}
+                      onChange={e => setFilterPaymentMethod(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 focus:border-indigo-400 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:bg-white transition cursor-pointer"
+                      title="Filtrar lançamentos por forma de pagamento"
+                    >
+                      <option value="todos">Todos os Pagamentos</option>
+                      <option value="dinheiro">💵 Dinheiro em Espécie</option>
+                      <option value="pix">⚡ PIX</option>
+                      <option value="cartao_credito">💳 Cartão de Crédito</option>
+                      <option value="cartao_debito">💳 Cartão de Débito</option>
+                      <option value="boleto">📄 Boleto</option>
+                      <option value="outros">🔄 Outros</option>
+                    </select>
+                  </div>
                 </div>
 
                 {/* CSV Downloader */}
-                <button
-                  onClick={exportToCSV}
-                  disabled={filteredTransactions.length === 0}
-                  className="px-3 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed font-semibold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
-                  title="Exportar dados atuais para planilha Excel"
-                >
-                  <Download size={13} />
-                  <span className="hidden sm:inline">Exportar Planilha</span>
-                </button>
-
-                {/* PDF Executive Report Generator */}
-                <button
-                  type="button"
-                  onClick={() => setIsExecutiveReportOpen(true)}
-                  className="px-3 py-2 bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-700 hover:to-indigo-700 text-white font-extrabold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer hover:shadow-xs"
-                  title="Gerar e imprimir relatório executivo para gestores da empresa"
-                >
-                  <Printer size={13} />
-                  <span>Relatório Executivo PDF</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setIsAccountantReportOpen(true)}
-                  className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white font-extrabold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer hover:shadow-xs"
-                  title="Gerar dossie contabil e organizador de Imposto de Renda para contador"
-                >
-                  <FileSpreadsheet size={13} />
-                  <span>Dossie Contabil / IR</span>
-                </button>
+                <div className="flex items-center gap-2 self-end md:self-auto">
+                  <button
+                    onClick={exportToCSV}
+                    disabled={filteredTransactions.length === 0}
+                    className="px-3.5 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed font-semibold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer border border-indigo-100"
+                    title="Exportar dados atuais para planilha Excel (CSV)"
+                  >
+                    <Download size={13} />
+                    <span>Exportar Planilha</span>
+                  </button>
+                </div>
               </div>
             )}
 
             {subTab === "alugueis" && (
-              <div className="flex items-center gap-2 w-full md:w-auto">
-                {/* New Dedicated Rental PDF Report Button */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedRentalIdForReport(null);
-                    setIsRentalReportOpen(true);
-                  }}
-                  className="px-3 py-2 bg-gradient-to-r from-emerald-600 to-indigo-650 hover:from-emerald-700 hover:to-indigo-750 text-white font-extrabold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs hover:shadow"
-                  title="Imprimir relatório separado de cobrança de aluguéis, com recebidos e pendentes"
-                >
-                  <Printer size={13} />
-                  <span>Relatório de Cobrança</span>
-                </button>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedRentalIdForReport(null);
+                      setIsRentalReportOpen(true);
+                    }}
+                    className="px-3.5 py-2 bg-emerald-50 border border-emerald-200/80 text-emerald-700 hover:bg-emerald-100 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                    title="Imprimir relatório detalhado de cobrança de aluguéis"
+                  >
+                    <Printer size={13} />
+                    <span>Relatório de Cobrança (PDF)</span>
+                  </button>
+                </div>
 
-                {/* PDF Executive Report Generator */}
-                <button
-                  type="button"
-                  onClick={() => setIsExecutiveReportOpen(true)}
-                  className="px-2.5 py-2 bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100 font-bold rounded-xl text-[11px] transition flex items-center gap-1 cursor-pointer"
-                  title="Imprimir relatório executivo consolidado do caixa"
-                >
-                  <span>Executivo Geral</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setIsAccountantReportOpen(true)}
-                  className="px-2.5 py-2 bg-slate-900 border border-slate-900 text-white hover:bg-slate-800 font-bold rounded-xl text-[11px] transition flex items-center gap-1 cursor-pointer"
-                  title="Imprimir dossie contabil com despesas, contas e anexos para contador"
-                >
-                  <span>Contabil / IR</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowNewRentForm(true)}
-                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-sm shadow-indigo-100 border border-indigo-500 hover:shadow"
-                  title="Adicionar novo contrato de aluguel"
-                >
-                  <Plus size={14} />
-                  <span>Cadastrar Novo Aluguel (LF)</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowNewRentForm(true)}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs hover:shadow"
+                    title="Adicionar novo contrato de aluguel"
+                  >
+                    <Plus size={14} />
+                    <span>Cadastrar Novo Contrato</span>
+                  </button>
+                </div>
               </div>
             )}
+
           </div>
 
           {subTab === "extrato" ? (
@@ -4600,15 +7039,80 @@ export default function App() {
                           {/* Transaction Description Column */}
                           <td className="px-5 py-3.5">
                             {isEditing ? (
-                              <input
-                                type="text"
-                                value={editDescription}
-                                onChange={(e) => setEditDescription(e.target.value)}
-                                className="bg-white border border-slate-300 rounded px-2 py-1 text-xs w-full max-w-xs"
-                              />
+                              <div className="space-y-1.5 max-w-xs">
+                                <input
+                                  type="text"
+                                  value={editDescription}
+                                  onChange={(e) => setEditDescription(e.target.value)}
+                                  className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-xs outline-none focus:border-indigo-500"
+                                />
+                                <div className="flex items-center gap-1.5">
+                                  <select
+                                    value={editPaymentMethod}
+                                    onChange={(e) => setEditPaymentMethod(e.target.value as PaymentMethod)}
+                                    className="text-[11px] bg-white border border-slate-300 rounded px-2 py-0.5 outline-none font-semibold text-slate-700"
+                                  >
+                                    <option value="dinheiro">💵 Dinheiro</option>
+                                    <option value="pix">⚡ PIX</option>
+                                    <option value="cartao_credito">💳 Cartão de Crédito</option>
+                                    <option value="cartao_debito">💳 Cartão de Débito</option>
+                                    <option value="boleto">📄 Boleto</option>
+                                    <option value="outros">🔄 Outros</option>
+                                  </select>
+
+                                  {editPaymentMethod === "cartao_credito" && activeCards.length > 0 && (
+                                    <select
+                                      value={editCardId}
+                                      onChange={(e) => setEditCardId(e.target.value)}
+                                      className="text-[11px] bg-white border border-slate-300 rounded px-2 py-0.5 outline-none font-semibold text-slate-700"
+                                    >
+                                      <option value="">Sem cartão</option>
+                                      {activeCards.map(c => (
+                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </div>
+                              </div>
                             ) : (
-                              <div className="font-semibold text-slate-700 leading-snug">
-                                {t.description}
+                              <div>
+                                <div className="font-semibold text-slate-700 leading-snug">
+                                  {t.description}
+                                </div>
+                                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                  {t.paymentMethod && (
+                                    <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                                      t.paymentMethod === "pix"
+                                        ? "bg-teal-50 text-teal-700 border-teal-200"
+                                        : t.paymentMethod === "cartao_credito"
+                                        ? "bg-purple-50 text-purple-700 border-purple-200"
+                                        : t.paymentMethod === "cartao_debito"
+                                        ? "bg-blue-50 text-blue-700 border-blue-200"
+                                        : t.paymentMethod === "boleto"
+                                        ? "bg-amber-50 text-amber-700 border-amber-200"
+                                        : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    }`}>
+                                      {t.paymentMethod === "pix" && "⚡ PIX"}
+                                      {t.paymentMethod === "dinheiro" && "💵 Dinheiro"}
+                                      {t.paymentMethod === "cartao_credito" && (
+                                        <>
+                                          💳 Cartão
+                                          {t.cardId && creditCards.find(c => c.id === t.cardId) && (
+                                            <span className="font-normal opacity-90">({creditCards.find(c => c.id === t.cardId)?.name})</span>
+                                          )}
+                                        </>
+                                      )}
+                                      {t.paymentMethod === "cartao_debito" && "💳 Débito"}
+                                      {t.paymentMethod === "boleto" && "📄 Boleto"}
+                                      {t.paymentMethod === "outros" && "🔄 Outros"}
+                                    </span>
+                                  )}
+                                  {t.installments && (
+                                    <span className="text-[10px] font-bold font-mono text-purple-600 bg-purple-50 border border-purple-200 px-1.5 py-0.2 rounded">
+                                      Parcela {t.installments.current}/{t.installments.total}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             )}
                           </td>
@@ -4626,20 +7130,15 @@ export default function App() {
                                 ))}
                               </select>
                             ) : (
-                              <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full border ${
-                                getCategoryBadgeStyle(t.category, t.type)
-                              }`}>
-                                {(() => {
-                                  const colorVal = getCategoryBgColor(t.category);
-                                  const isHex = colorVal.startsWith("#");
-                                  return (
-                                    <span 
-                                      className={`h-1.5 w-1.5 rounded-full ${!isHex ? colorVal : ""}`}
-                                      style={isHex ? { backgroundColor: colorVal } : undefined}
-                                    ></span>
-                                  );
-                                })()}
-                                {t.category}
+                              <span 
+                                className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full border shadow-3xs"
+                                style={getCategoryBadgeInlineStyle(t.category, t.type)}
+                              >
+                                <span 
+                                  className="h-1.5 w-1.5 rounded-full shrink-0 border border-black/10 shadow-3xs"
+                                  style={{ backgroundColor: getCategoryColorHex(t.category) }}
+                                />
+                                <span>{t.category}</span>
                               </span>
                             )}
                           </td>
@@ -4879,10 +7378,37 @@ export default function App() {
                       .map(tpl => (
                         <div key={tpl.id} className="bg-slate-50 border border-slate-100 p-4 rounded-xl hover:border-emerald-200 hover:shadow-sm transition flex items-center justify-between gap-3 relative group">
                           <div className="min-w-0 flex-1">
-                            <span className="text-[10px] bg-indigo-50 text-indigo-700 font-extrabold px-1.5 py-0.5 rounded flex items-center gap-1 w-max mb-1.5">
-                              <Clock size={10} />
-                              Todo Dia {tpl.dueDay}
-                            </span>
+                            <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                              <span className="text-[10px] bg-indigo-50 text-indigo-700 font-extrabold px-1.5 py-0.5 rounded flex items-center gap-1 w-max">
+                                <Clock size={10} />
+                                Todo Dia {tpl.dueDay}
+                              </span>
+                              {(() => {
+                                const targetYear = filterYear !== "todos" ? filterYear : String(new Date().getFullYear());
+                                const targetMonth = filterMonth !== "todos" ? filterMonth : String(new Date().getMonth() + 1).padStart(2, "0");
+                                const isPosted = transactions.some(t => 
+                                  t.caixaId === activeCaixaId && 
+                                  t.type === "entrada" && 
+                                  t.description.toLowerCase().includes(tpl.description.toLowerCase()) && 
+                                  t.date.startsWith(`${targetYear}-${targetMonth}`)
+                                );
+                                return isPosted ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openLaunchFixedModal(tpl)}
+                                    className="text-[9px] font-bold text-emerald-700 bg-emerald-100/70 hover:bg-emerald-200 px-1.5 py-0.5 rounded cursor-pointer transition flex items-center gap-1"
+                                    title="Clique para editar ou sincronizar o valor já lançado neste mês"
+                                  >
+                                    <span>✓ Lançado no mês</span>
+                                    <span className="underline font-normal text-[8px]">(ajustar)</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-[9px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                    Pendente
+                                  </span>
+                                );
+                              })()}
+                            </div>
                             <h4 className="font-bold text-slate-800 text-xs truncate leading-tight mb-1" title={tpl.description}>
                               {tpl.description}
                             </h4>
@@ -4895,11 +7421,18 @@ export default function App() {
                             </span>
                             <div className="flex items-center gap-1">
                               <button
-                                onClick={() => handlePostFixedTemplate(tpl)}
+                                onClick={() => openLaunchFixedModal(tpl)}
                                 className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded-lg transition cursor-pointer"
-                                title="Inserir lançamento direto no fluxo do mês"
+                                title="Inserir ou atualizar lançamento no fluxo do mês"
                               >
                                 ⚡ Lançar
+                              </button>
+                              <button
+                                onClick={() => openEditFixedModal(tpl)}
+                                className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                                title="Editar dados cadastrais deste fixo (descrição, valor base, dia, categoria)"
+                              >
+                                <Edit2 size={11} />
                               </button>
                               <button
                                 onClick={() => handleDeleteFixedTemplate(tpl.id)}
@@ -4935,10 +7468,37 @@ export default function App() {
                       .map(tpl => (
                         <div key={tpl.id} className="bg-slate-50 border border-slate-100 p-4 rounded-xl hover:border-rose-200 hover:shadow-sm transition flex items-center justify-between gap-3 relative group">
                           <div className="min-w-0 flex-1">
-                            <span className="text-[10px] bg-rose-50 text-rose-700 font-extrabold px-1.5 py-0.5 rounded flex items-center gap-1 w-max mb-1.5">
-                              <Clock size={10} />
-                              Vence Dia {tpl.dueDay}
-                            </span>
+                            <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                              <span className="text-[10px] bg-rose-50 text-rose-700 font-extrabold px-1.5 py-0.5 rounded flex items-center gap-1 w-max">
+                                <Clock size={10} />
+                                Vence Dia {tpl.dueDay}
+                              </span>
+                              {(() => {
+                                const targetYear = filterYear !== "todos" ? filterYear : String(new Date().getFullYear());
+                                const targetMonth = filterMonth !== "todos" ? filterMonth : String(new Date().getMonth() + 1).padStart(2, "0");
+                                const isPosted = transactions.some(t => 
+                                  t.caixaId === activeCaixaId && 
+                                  t.type === "saida" && 
+                                  t.description.toLowerCase().includes(tpl.description.toLowerCase()) && 
+                                  t.date.startsWith(`${targetYear}-${targetMonth}`)
+                                );
+                                return isPosted ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openLaunchFixedModal(tpl)}
+                                    className="text-[9px] font-bold text-emerald-700 bg-emerald-100/70 hover:bg-emerald-200 px-1.5 py-0.5 rounded cursor-pointer transition flex items-center gap-1"
+                                    title="Clique para editar ou sincronizar o valor já lançado neste mês"
+                                  >
+                                    <span>✓ Lançado no mês</span>
+                                    <span className="underline font-normal text-[8px]">(ajustar)</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-[9px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                    Pendente
+                                  </span>
+                                );
+                              })()}
+                            </div>
                             <h4 className="font-bold text-slate-800 text-xs truncate leading-tight mb-1" title={tpl.description}>
                               {tpl.description}
                             </h4>
@@ -4951,11 +7511,18 @@ export default function App() {
                             </span>
                             <div className="flex items-center gap-1">
                               <button
-                                onClick={() => handlePostFixedTemplate(tpl)}
+                                onClick={() => openLaunchFixedModal(tpl)}
                                 className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 text-[10px] font-bold rounded-lg transition cursor-pointer"
-                                title="Registrar quitação de despesa no extrato do mês"
+                                title="Registrar ou ajustar lançamento no extrato do mês (com ajuste de centavos)"
                               >
                                 ⚡ Lançar
+                              </button>
+                              <button
+                                onClick={() => openEditFixedModal(tpl)}
+                                className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                                title="Editar dados cadastrais deste fixo (descrição, valor base, dia, categoria)"
+                              >
+                                <Edit2 size={11} />
                               </button>
                               <button
                                 onClick={() => handleDeleteFixedTemplate(tpl.id)}
@@ -4979,6 +7546,18 @@ export default function App() {
               </div>
 
             </div>
+          ) : subTab === "cartoes" ? (
+            <CreditCardsManager
+              creditCards={creditCards}
+              onSaveCard={handleSaveCreditCard}
+              onDeleteCard={handleDeleteCreditCard}
+              transactions={transactions}
+              activeCaixaId={activeCaixaId}
+              filterMonth={filterMonth}
+              filterYear={filterYear}
+              monthsList={monthsList}
+              onPostInvoiceToLedger={handlePostCardInvoiceToLedger}
+            />
           ) : subTab === "alugueis" ? (
             /* SubTab "alugueis": Rental Properties (LF) Panel */
             <div className="flex flex-col gap-6 w-full">
@@ -5003,7 +7582,7 @@ export default function App() {
                   <span className="text-[10px] text-emerald-600 mt-0.5 font-semibold">
                     R$ {rentals
                           .filter(r => (!r.caixaId || r.caixaId === activeCaixaId) && r.paidPeriods.includes(filterYear !== "todos" && filterMonth !== "todos" ? `${filterYear}-${filterMonth}` : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`))
-                          .reduce((sum, r) => sum + r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount, 0)
+                          .reduce((sum, r) => sum + getRentalExpectedAmount(r), 0)
                           .toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} pagos
                   </span>
                 </div>
@@ -5018,7 +7597,7 @@ export default function App() {
                   <span className="text-[10px] text-amber-600 font-bold mt-0.5">
                     R$ {rentals
                           .filter(r => (!r.caixaId || r.caixaId === activeCaixaId) && !r.paidPeriods.includes(filterYear !== "todos" && filterMonth !== "todos" ? `${filterYear}-${filterMonth}` : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`))
-                          .reduce((sum, r) => sum + r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount, 0)
+                          .reduce((sum, r) => sum + getRentalExpectedAmount(r), 0)
                           .toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} em aberto
                   </span>
                 </div>
@@ -5027,7 +7606,7 @@ export default function App() {
                   <span className="text-lg font-mono font-bold text-indigo-700">
                     R$ {rentals
                           .filter(r => !r.caixaId || r.caixaId === activeCaixaId)
-                          .reduce((sum, r) => sum + r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount, 0)
+                          .reduce((sum, r) => sum + getRentalExpectedAmount(r), 0)
                           .toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                   <span className="text-[10px] text-indigo-500 mt-0.5">Mês: {formatPeriodBRL(filterYear !== "todos" && filterMonth !== "todos" ? `${filterYear}-${filterMonth}` : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`)}</span>
@@ -5150,6 +7729,7 @@ export default function App() {
                               <th className="p-3 text-right whitespace-nowrap w-20">Lixo</th>
                               <th className="p-3 text-right whitespace-nowrap w-20">Luz</th>
                               <th className="p-3 text-right whitespace-nowrap w-20">Multa</th>
+                              <th className="p-3 text-right whitespace-nowrap w-28 bg-indigo-50/20 text-indigo-900 font-bold">Ajustes (+/-)</th>
                               <th className="p-3 text-right whitespace-nowrap text-rose-550 w-24 bg-rose-50/25 font-bold">Tx Admin</th>
                               <th className="p-3 text-right whitespace-nowrap text-slate-700 bg-slate-50/30 w-24 font-bold">Total Somado</th>
                               <th 
@@ -5169,7 +7749,7 @@ export default function App() {
                             {pendingRentals.length > 0 ? (
                               pendingRentals.map(rental => {
                                 const totalSummed = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount;
-                                const totalPropertyReceivable = totalSummed - rental.adminFeeAmount;
+                                const totalPropertyReceivable = getRentalExpectedAmount(rental, activePeriodStr);
                                 const pendingCarryover = getPendingRentalCarryover(rental, activePeriodStr);
 
                                 return (
@@ -5187,8 +7767,16 @@ export default function App() {
                                           <span>{rental.address}</span>
                                         </div>
                                         
-                                        <div className="mt-1 flex items-center">
-                                          {rental.hasDeposit ? (
+                                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                                          {rental.guaranteeType === "fiador" || (!rental.hasDeposit && rental.guarantorName) ? (
+                                            <span
+                                              className="inline-flex items-center gap-1 bg-amber-50 text-amber-800 font-bold text-[9px] px-1.5 py-0.5 rounded-md border border-amber-200"
+                                              title={`Fiador: ${rental.guarantorName || "Cadastrado"}${rental.guarantorPhone ? ` | Tel: ${rental.guarantorPhone}` : ""}${rental.guarantorCpf ? ` | CPF: ${rental.guarantorCpf}` : ""}`}
+                                            >
+                                              <ShieldCheck size={9} className="text-amber-600" />
+                                              <span>Fiador: {rental.guarantorName || "Cadastrado"}</span>
+                                            </span>
+                                          ) : rental.hasDeposit ? (
                                             <button
                                               type="button"
                                               onClick={() => setSelectedDepositRental(rental)}
@@ -5202,14 +7790,36 @@ export default function App() {
                                           ) : (
                                             <button
                                               type="button"
-                                              onClick={() => setSelectedDepositRental(rental)}
+                                              onClick={() => startEditingRental(rental)}
                                               className="inline-flex items-center gap-0.5 bg-slate-50 hover:bg-indigo-50/70 hover:text-indigo-700 text-slate-450 font-bold text-[8.5px] px-1.5 py-0.5 rounded-md border border-slate-200 hover:border-indigo-200 transition cursor-pointer select-none active:scale-95"
-                                              title="Clique para vincular uma caução a este aluguel"
+                                              title="Clique para definir garantia deste contrato"
                                             >
-                                              <Lock size={8} className="opacity-50" />
-                                              <span>Adicionar Caução</span>
+                                              <ShieldCheck size={8} className="opacity-50" />
+                                              <span>Definir Garantia</span>
                                             </button>
                                           )}
+
+                                          {(() => {
+                                            const applicableAdjs = getRentalApplicableAdjustments(rental, activePeriodStr);
+                                            if (applicableAdjs.length === 0) return null;
+                                            const net = getRentalAdjustmentsNetTotal(rental, activePeriodStr);
+                                            return (
+                                              <button
+                                                type="button"
+                                                onClick={() => setManagingAdjustmentsRental(rental)}
+                                                className={`inline-flex items-center gap-1 font-bold text-[9px] px-1.5 py-0.5 rounded-md border cursor-pointer select-none transition hover:opacity-85 ${
+                                                  net < 0
+                                                    ? "bg-rose-50 text-rose-800 border-rose-200"
+                                                    : "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                                }`}
+                                                title={`Clique para gerenciar ajustes: ${applicableAdjs.length} ajuste(s) ativo(s)`}
+                                              >
+                                                <span>{net < 0 ? "➖" : "➕"}</span>
+                                                <span>{net < 0 ? "-" : "+"} R$ {Math.abs(net).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+                                                <span className="opacity-70 font-normal">({applicableAdjs.length > 1 ? `${applicableAdjs.length} ajustes` : applicableAdjs[0].description})</span>
+                                              </button>
+                                            );
+                                          })()}
                                         </div>
                                         {pendingCarryover > 0 && (
                                           <div className="mt-1.5 inline-flex w-fit items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[9px] font-bold text-amber-900">
@@ -5239,6 +7849,47 @@ export default function App() {
                                     </td>
                                     <td className="p-3 text-right font-mono">
                                       {rental.fineAmount > 0 ? `R$ ${rental.fineAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "-"}
+                                    </td>
+                                    <td className="p-3 text-right whitespace-nowrap">
+                                      {(() => {
+                                        const applicableAdjs = getRentalApplicableAdjustments(rental, activePeriodStr);
+                                        const netAdj = getRentalAdjustmentsNetTotal(rental, activePeriodStr);
+                                        if (applicableAdjs.length > 0) {
+                                          return (
+                                            <button
+                                              type="button"
+                                              onClick={() => setManagingAdjustmentsRental(rental)}
+                                              className={`group inline-flex flex-col items-end px-2 py-1 rounded-lg border text-right transition cursor-pointer select-none shadow-2xs ${
+                                                netAdj >= 0
+                                                  ? "bg-emerald-50 border-emerald-250 text-emerald-800 hover:bg-emerald-100"
+                                                  : "bg-rose-50 border-rose-250 text-rose-800 hover:bg-rose-100"
+                                              }`}
+                                              title="Clique para gerenciar ajustes de valor (adicionar, subtrair, fixo ou pontual)"
+                                            >
+                                              <span className="font-mono font-bold text-[11px] flex items-center gap-1">
+                                                {netAdj >= 0 ? `+ R$ ${netAdj.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `- R$ ${Math.abs(netAdj).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                                <span className="text-[9px] px-1 rounded-full bg-white font-bold border border-slate-200">
+                                                  {applicableAdjs.length}
+                                                </span>
+                                              </span>
+                                              <span className="text-[8.5px] opacity-75 font-medium group-hover:underline">
+                                                {applicableAdjs.some(a => a.recurrence === "pontual") ? "pontual" : "fixo"} • gerenciar
+                                              </span>
+                                            </button>
+                                          );
+                                        }
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={() => setManagingAdjustmentsRental(rental)}
+                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-dashed border-slate-300 hover:border-indigo-400 bg-slate-50/70 hover:bg-indigo-50 text-slate-500 hover:text-indigo-700 font-bold text-[10px] transition cursor-pointer select-none"
+                                            title="Clique para adicionar ajuste de valor (acréscimo ou abatimento pontual ou fixo)"
+                                          >
+                                            <SlidersHorizontal size={11} className="text-slate-400" />
+                                            <span>+ Ajuste</span>
+                                          </button>
+                                        );
+                                      })()}
                                     </td>
                                     <td className="p-3 text-right text-rose-600 bg-rose-50/10">
                                       <div className="flex flex-col items-end gap-1 select-none">
@@ -5326,7 +7977,7 @@ export default function App() {
                               })
                             ) : (
                               <tr>
-                                <td colSpan={14} className="p-12 text-center text-slate-400">
+                                <td colSpan={15} className="p-12 text-center text-slate-400">
                                   <div className="flex flex-col items-center justify-center max-w-sm mx-auto">
                                     <span className="text-xl mb-1">🎉</span>
                                     <span className="text-xs font-semibold text-emerald-800">Tudo Recebido!</span>
@@ -5367,6 +8018,7 @@ export default function App() {
                               <th className="p-3 text-right whitespace-nowrap w-20">Lixo</th>
                               <th className="p-3 text-right whitespace-nowrap w-20">Luz</th>
                               <th className="p-3 text-right whitespace-nowrap w-20">Multa</th>
+                              <th className="p-3 text-right whitespace-nowrap w-28 bg-emerald-50/20 text-emerald-950 font-bold">Ajustes (+/-)</th>
                               <th className="p-3 text-right whitespace-nowrap text-rose-700/80 w-24">Tx Admin</th>
                               <th className="p-3 text-right whitespace-nowrap text-slate-550 w-24">Total Somado</th>
                               <th className="p-3 text-right whitespace-nowrap text-emerald-900 bg-emerald-50/25 w-28 font-extrabold">Recebível Líquido</th>
@@ -5378,7 +8030,7 @@ export default function App() {
                             {receivedRentals.length > 0 ? (
                               receivedRentals.map(rental => {
                                 const totalSummed = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount;
-                                const totalPropertyReceivable = totalSummed - rental.adminFeeAmount;
+                                const totalPropertyReceivable = getRentalExpectedAmount(rental, activePeriodStr);
                                 const currentAdjustment = rental.paymentAdjustments?.[activePeriodStr];
                                 const receivedAmount = rental.paymentAmounts?.[activePeriodStr] ?? totalPropertyReceivable;
 
@@ -5397,8 +8049,16 @@ export default function App() {
                                           <span>{rental.address}</span>
                                         </div>
                                         
-                                        <div className="mt-1 flex items-center">
-                                          {rental.hasDeposit && (
+                                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                                          {rental.guaranteeType === "fiador" || (!rental.hasDeposit && rental.guarantorName) ? (
+                                            <span
+                                              className="inline-flex items-center gap-1 bg-amber-50 text-amber-800 font-bold text-[9px] px-1.5 py-0.5 rounded-md border border-amber-200"
+                                              title={`Fiador: ${rental.guarantorName || "Cadastrado"}${rental.guarantorPhone ? ` | Tel: ${rental.guarantorPhone}` : ""}${rental.guarantorCpf ? ` | CPF: ${rental.guarantorCpf}` : ""}`}
+                                            >
+                                              <ShieldCheck size={9} className="text-amber-600" />
+                                              <span>Fiador: {rental.guarantorName || "Cadastrado"}</span>
+                                            </span>
+                                          ) : rental.hasDeposit ? (
                                             <button
                                               type="button"
                                               onClick={() => setSelectedDepositRental(rental)}
@@ -5407,33 +8067,96 @@ export default function App() {
                                               <Lock size={9} className="text-emerald-600" />
                                               <span>Caução vinculada</span>
                                             </button>
-                                          )}
+                                          ) : null}
+
+                                          {(() => {
+                                            const applicableAdjs = getRentalApplicableAdjustments(rental, activePeriodStr);
+                                            if (applicableAdjs.length === 0) return null;
+                                            const net = getRentalAdjustmentsNetTotal(rental, activePeriodStr);
+                                            return (
+                                              <button
+                                                type="button"
+                                                onClick={() => setManagingAdjustmentsRental(rental)}
+                                                className={`inline-flex items-center gap-1 font-bold text-[9px] px-1.5 py-0.5 rounded-md border cursor-pointer select-none transition hover:opacity-85 ${
+                                                  net < 0
+                                                    ? "bg-rose-50 text-rose-800 border-rose-200"
+                                                    : "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                                }`}
+                                                title={`Clique para gerenciar ajustes: ${applicableAdjs.length} ajuste(s) ativo(s)`}
+                                              >
+                                                <span>{net < 0 ? "➖" : "➕"}</span>
+                                                <span>{net < 0 ? "-" : "+"} R$ {Math.abs(net).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+                                                <span className="opacity-70 font-normal">({applicableAdjs.length > 1 ? `${applicableAdjs.length} ajustes` : applicableAdjs[0].description})</span>
+                                              </button>
+                                            );
+                                          })()}
                                         </div>
+                                        {/* Exibicao das Partes de Pagamento se houver mais de 1 parte */}
+                                        {currentAdjustment?.parts && currentAdjustment.parts.length > 1 && (
+                                          <div className="mt-1.5 flex flex-col gap-1 p-1.5 rounded-lg bg-emerald-100/50 border border-emerald-250 text-[9px]">
+                                            <span className="font-bold text-emerald-900 uppercase text-[8.5px]">Pagamento Quitado em {currentAdjustment.parts.length} Partes:</span>
+                                            <div className="space-y-0.5">
+                                              {currentAdjustment.parts.map((p, idx) => (
+                                                <div key={p.id || idx} className="flex items-center justify-between gap-1 text-slate-700">
+                                                  <span className="font-semibold text-emerald-800">
+                                                    {idx + 1}ª: {getRentalPaymentMethodLabel(p.paymentMethod).split(" ")[0]} ({p.date.split("-").reverse().join("/")})
+                                                  </span>
+                                                  <span className="font-mono font-bold text-slate-900">
+                                                    R$ {p.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                                                  </span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
                                         {currentAdjustment && Math.abs(currentAdjustment.difference) >= 0.01 && (
-                                          <div className={`mt-1.5 rounded-lg border px-2 py-1 text-[9px] font-bold ${
+                                          <div className={`mt-1.5 rounded-xl border p-2 text-[9px] font-bold ${
                                             currentAdjustment.difference > 0
-                                              ? "border-amber-200 bg-amber-50 text-amber-900"
+                                              ? "border-amber-200 bg-amber-50/90 text-amber-900"
                                               : "border-sky-200 bg-sky-50 text-sky-800"
                                           }`}>
-                                            {currentAdjustment.difference > 0
-                                              ? `Recebido a menos: R$ ${currentAdjustment.difference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
-                                              : `Recebido a mais: R$ ${Math.abs(currentAdjustment.difference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
-                                            {currentAdjustment.status === "pending" && (
-                                              <div className="mt-1 flex flex-wrap gap-1">
+                                            <div className="flex items-center justify-between">
+                                              <span>
+                                                {currentAdjustment.difference > 0
+                                                  ? `Saldo devedor: R$ ${currentAdjustment.difference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`
+                                                  : `Recebido a mais: R$ ${Math.abs(currentAdjustment.difference).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
+                                              </span>
+                                              <span className={`text-[8.5px] px-1.5 py-0.2 rounded-full border ${
+                                                currentAdjustment.status === "pending" ? "bg-amber-200/80 border-amber-300 text-amber-900" : "bg-white border-slate-200 text-slate-650"
+                                              }`}>
+                                                {currentAdjustment.status === "pending" ? "Aberto" : "Aliviado"}
+                                              </span>
+                                            </div>
+
+                                            {currentAdjustment.difference > 0 && currentAdjustment.status === "pending" && (
+                                              <div className="mt-2 flex flex-col gap-1.5">
                                                 <button
                                                   type="button"
-                                                  onClick={() => handleResolveRentalDifference(rental.id, activePeriodStr, "charged")}
-                                                  className="rounded-md bg-amber-600 px-1.5 py-0.5 text-white"
+                                                  onClick={() => openPayShortfallModal(rental, activePeriodStr, currentAdjustment.difference)}
+                                                  className="w-full py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] flex items-center justify-center gap-1 shadow-2xs transition cursor-pointer"
+                                                  title="Marcar como recebida a 2ª parte para outra data deste mesmo mês"
                                                 >
-                                                  Cobrado
+                                                  <span>💵 Quitar 2ª Parte</span>
+                                                  <span className="font-mono">(R$ {currentAdjustment.difference.toLocaleString("pt-BR", { minimumFractionDigits: 2 })})</span>
                                                 </button>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleResolveRentalDifference(rental.id, activePeriodStr, "forgiven")}
-                                                  className="rounded-md bg-white px-1.5 py-0.5 text-slate-600 border border-slate-200"
-                                                >
-                                                  Aliviar
-                                                </button>
+
+                                                <div className="flex items-center gap-1">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleResolveRentalDifference(rental.id, activePeriodStr, "charged")}
+                                                    className="flex-1 rounded-md bg-amber-600 hover:bg-amber-700 px-1.5 py-0.5 text-white text-[9px] font-semibold transition cursor-pointer"
+                                                  >
+                                                    Cobrar depois
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleResolveRentalDifference(rental.id, activePeriodStr, "forgiven")}
+                                                    className="flex-1 rounded-md bg-white hover:bg-slate-50 px-1.5 py-0.5 text-slate-650 border border-slate-200 text-[9px] font-semibold transition cursor-pointer"
+                                                  >
+                                                    Aliviar saldo
+                                                  </button>
+                                                </div>
                                               </div>
                                             )}
                                           </div>
@@ -5460,6 +8183,47 @@ export default function App() {
                                     </td>
                                     <td className="p-3 text-right font-mono">
                                       {rental.fineAmount > 0 ? `R$ ${rental.fineAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "-"}
+                                    </td>
+                                    <td className="p-3 text-right whitespace-nowrap">
+                                      {(() => {
+                                        const applicableAdjs = getRentalApplicableAdjustments(rental, activePeriodStr);
+                                        const netAdj = getRentalAdjustmentsNetTotal(rental, activePeriodStr);
+                                        if (applicableAdjs.length > 0) {
+                                          return (
+                                            <button
+                                              type="button"
+                                              onClick={() => setManagingAdjustmentsRental(rental)}
+                                              className={`group inline-flex flex-col items-end px-2 py-1 rounded-lg border text-right transition cursor-pointer select-none shadow-2xs ${
+                                                netAdj >= 0
+                                                  ? "bg-emerald-100/50 border-emerald-300 text-emerald-900 hover:bg-emerald-100"
+                                                  : "bg-rose-100/50 border-rose-300 text-rose-900 hover:bg-rose-100"
+                                              }`}
+                                              title="Clique para gerenciar ajustes de valor (adicionar, subtrair, fixo ou pontual)"
+                                            >
+                                              <span className="font-mono font-bold text-[11px] flex items-center gap-1">
+                                                {netAdj >= 0 ? `+ R$ ${netAdj.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `- R$ ${Math.abs(netAdj).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                                <span className="text-[9px] px-1 rounded-full bg-white font-bold border border-slate-200">
+                                                  {applicableAdjs.length}
+                                                </span>
+                                              </span>
+                                              <span className="text-[8.5px] opacity-75 font-medium group-hover:underline">
+                                                {applicableAdjs.some(a => a.recurrence === "pontual") ? "pontual" : "fixo"} • gerenciar
+                                              </span>
+                                            </button>
+                                          );
+                                        }
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={() => setManagingAdjustmentsRental(rental)}
+                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-dashed border-emerald-200 hover:border-emerald-400 bg-white hover:bg-emerald-50 text-slate-500 hover:text-emerald-800 font-bold text-[10px] transition cursor-pointer select-none"
+                                            title="Clique para adicionar ajuste de valor (acréscimo ou abatimento pontual ou fixo)"
+                                          >
+                                            <SlidersHorizontal size={11} className="text-emerald-500" />
+                                            <span>+ Ajuste</span>
+                                          </button>
+                                        );
+                                      })()}
                                     </td>
                                     <td className="p-3 text-right text-rose-650/85">
                                       <div className="flex flex-col items-end gap-0.5">
@@ -5531,7 +8295,7 @@ export default function App() {
                               })
                             ) : (
                               <tr>
-                                <td colSpan={14} className="p-8 text-center text-slate-400">
+                                <td colSpan={15} className="p-8 text-center text-slate-400">
                                   <span className="text-[11px] font-sans italic">Nenhum aluguel quitado/recebido no período ativo de {formatPeriodBRL(activePeriodStr)} ainda.</span>
                                 </td>
                               </tr>
@@ -5730,27 +8494,104 @@ export default function App() {
                           <span className="text-[10px] text-amber-600 mt-1">Este percentual da taxa de administração será cobrado sobre o valor base do aluguel.</span>
                         </div>
 
-                        {/* DEPOSIT (CAUÇÃO) SECTION */}
-                        <div className="flex flex-col bg-slate-50 p-3 rounded-lg border border-slate-200">
-                          <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-755 text-[11px] mb-1.5 select-none">
-                            <input
-                              type="checkbox"
-                              checked={newRentHasDeposit}
-                              onChange={(e) => {
-                                const checked = e.target.checked;
-                                setNewRentHasDeposit(checked);
-                                if (checked) {
+                        {/* GARANTIA LOCATÍCIA (CAUÇÃO / FIADOR / NENHUMA) */}
+                        <div className="flex flex-col bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <label className="font-bold text-slate-700 text-[11px] flex items-center gap-1.5">
+                              <ShieldCheck size={13} className="text-indigo-600" />
+                              <span>Garantia Locatícia</span>
+                            </label>
+                            <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-slate-200">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewRentGuaranteeType("caucao");
+                                  setNewRentHasDeposit(true);
                                   const rentVal = parseFloat(newRentAmountStr.replace(",", ".")) || 0;
-                                  setNewRentDepositAmountStr((rentVal * newRentDepositMonths).toFixed(2).replace(".", ","));
-                                }
-                              }}
-                              className="h-3.5 w-3.5 rounded text-indigo-600 focus:ring-indigo-550 border-slate-300 cursor-pointer"
-                            />
-                            <span>Possui Caução de Garantia?</span>
-                          </label>
+                                  if (!newRentDepositAmountStr) {
+                                    setNewRentDepositAmountStr((rentVal * newRentDepositMonths).toFixed(2).replace(".", ","));
+                                  }
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  newRentGuaranteeType === "caucao" || (newRentHasDeposit && newRentGuaranteeType !== "fiador" && newRentGuaranteeType !== "nenhuma")
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Caução
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewRentGuaranteeType("fiador");
+                                  setNewRentHasDeposit(false);
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  newRentGuaranteeType === "fiador"
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Fiador
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewRentGuaranteeType("nenhuma");
+                                  setNewRentHasDeposit(false);
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  newRentGuaranteeType === "nenhuma" && !newRentHasDeposit
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Nenhuma
+                              </button>
+                            </div>
+                          </div>
 
-                          {newRentHasDeposit && (
-                            <div className="mt-1 space-y-3 pt-2.5 border-t border-slate-200 overflow-hidden">
+                          {/* FIADOR FORM */}
+                          {newRentGuaranteeType === "fiador" && (
+                            <div className="pt-2 border-t border-slate-200 space-y-2">
+                              <div className="flex flex-col">
+                                <label className="font-bold text-slate-500 mb-1 text-[10px]">Nome Completo do Fiador</label>
+                                <input
+                                  type="text"
+                                  placeholder="Ex: Carlos Eduardo de Oliveira"
+                                  value={newRentGuarantorName}
+                                  onChange={(e) => setNewRentGuarantorName(e.target.value)}
+                                  className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div className="flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">CPF do Fiador</label>
+                                  <input
+                                    type="text"
+                                    placeholder="000.000.000-00"
+                                    value={newRentGuarantorCpf}
+                                    onChange={(e) => setNewRentGuarantorCpf(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                  />
+                                </div>
+                                <div className="flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">Telefone / WhatsApp</label>
+                                  <input
+                                    type="text"
+                                    placeholder="(00) 00000-0000"
+                                    value={newRentGuarantorPhone}
+                                    onChange={(e) => setNewRentGuarantorPhone(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* CAUÇÃO FORM */}
+                          {(newRentGuaranteeType === "caucao" || newRentHasDeposit) && newRentGuaranteeType !== "fiador" && newRentGuaranteeType !== "nenhuma" && (
+                            <div className="mt-1 space-y-3 pt-2 border-t border-slate-200 overflow-hidden">
                               {/* Quantity of months selector */}
                               <div>
                                 <label className="block text-[10px] font-bold text-slate-500 mb-1">Quantidade de Meses do Aluguel</label>
@@ -5766,7 +8607,7 @@ export default function App() {
                                       }}
                                       className={`py-1 px-1.5 text-[10px] font-bold rounded-md border text-center transition cursor-pointer select-none ${
                                         newRentDepositMonths === m
-                                          ? "bg-indigo-50 border-indigo-300 text-indigo-700"
+                                          ? "bg-indigo-50 border-indigo-300 text-indigo-700 font-extrabold"
                                           : "bg-white border-slate-200 text-slate-650 hover:bg-slate-50"
                                       }`}
                                     >
@@ -5778,7 +8619,7 @@ export default function App() {
                                     onClick={() => setNewRentDepositMonths(0)}
                                     className={`py-1 px-1.5 text-[10px] font-bold rounded-md border text-center transition cursor-pointer select-none ${
                                       newRentDepositMonths === 0
-                                        ? "bg-indigo-50 border-indigo-300 text-indigo-700"
+                                        ? "bg-indigo-50 border-indigo-300 text-indigo-700 font-extrabold"
                                         : "bg-white border-slate-200 text-slate-650 hover:bg-slate-50"
                                     }`}
                                   >
@@ -5835,43 +8676,164 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* PREVIEW MATH BLOCK */}
-                        <div className="bg-indigo-950 text-indigo-100 p-4 rounded-xl space-y-2 mt-4 shadow-sm">
-                          <div className="flex justify-between items-center text-[10px] uppercase font-bold tracking-wider opacity-90 border-b border-indigo-900 pb-1.5">
-                            <span>Resumo Detalhado</span>
-                            <span>Visualização Líquida</span>
-                          </div>
-                          <div className="space-y-1 font-mono text-[11px] opacity-80 leading-normal">
-                            <div className="flex justify-between">
-                              <span>Aluguel:</span>
-                              <span>R$ {(parseFloat(newRentAmountStr.replace(",", ".")) || 0).toFixed(2)}</span>
+                        {/* BOTÃO DE AJUSTE DE VALOR (+ / -) */}
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 text-slate-700">
+                              <SlidersHorizontal size={14} className="text-indigo-600" />
+                              <span className="font-bold text-[11px]">Ajuste de Valor (+ / -)</span>
+                              {newRentAdjustmentActive && (
+                                <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                                  newRentAdjustmentMode === "subtract" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                                }`}>
+                                  {newRentAdjustmentMode === "subtract" ? "Abatimento Ativo" : "Acréscimo Ativo"}
+                                </span>
+                              )}
                             </div>
-                            {((parseFloat(newRentWaterStr.replace(",", ".")) || 0) > 0 || (parseFloat(newRentIptuStr.replace(",", ".")) || 0) > 0 || (parseFloat(newRentLightStr.replace(",", ".")) || 0) > 0 || (parseFloat(newRentGarbageStr.replace(",", ".")) || 0) > 0 || (parseFloat(newRentFineStr.replace(",", ".")) || 0) > 0) && (
-                              <div className="flex justify-between">
-                                <span>Encargos (Consumo/Tributos):</span>
-                                <span>R$ {((parseFloat(newRentWaterStr.replace(",", ".")) || 0) + (parseFloat(newRentIptuStr.replace(",", ".")) || 0) + (parseFloat(newRentGarbageStr.replace(",", ".")) || 0) + (parseFloat(newRentLightStr.replace(",", ".")) || 0) + (parseFloat(newRentFineStr.replace(",", ".")) || 0)).toFixed(2)}</span>
-                              </div>
-                            )}
-                            {(parseFloat(newRentAdminFeePercentStr.replace(",", ".")) || 0) > 0 && (
-                              <div className="flex justify-between text-rose-300">
-                                <span>(-) Taxa Administração ({parseFloat(newRentAdminFeePercentStr.replace(",", "."))}%):</span>
-                                <span>- R$ {(((parseFloat(newRentAmountStr.replace(",", ".")) || 0) * (parseFloat(newRentAdminFeePercentStr.replace(",", ".")) || 0)) / 100).toFixed(2)}</span>
-                              </div>
+                            {!newRentAdjustmentActive ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewRentAdjustmentActive(true);
+                                  if (!newRentAdjustmentMode) setNewRentAdjustmentMode("add");
+                                }}
+                                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10px] font-bold rounded-lg transition cursor-pointer flex items-center gap-1"
+                              >
+                                <Plus size={11} />
+                                <span>Adicionar Ajuste</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setNewRentAdjustmentActive(false);
+                                  setNewRentAdjustmentAmountStr("");
+                                  setNewRentAdjustmentReason("");
+                                }}
+                                className="px-2 py-0.5 bg-slate-200 hover:bg-rose-100 text-slate-600 hover:text-rose-700 text-[9px] font-bold rounded-md transition cursor-pointer"
+                                title="Desativar e remover ajuste de valor"
+                              >
+                                Remover Ajuste
+                              </button>
                             )}
                           </div>
-                          <div className="flex justify-between items-center pt-2 border-t border-indigo-900 font-bold">
-                            <span className="text-xs uppercase">Recebimento Líquido</span>
-                            <span className="text-sm font-mono text-emerald-300">
-                              R$ {((parseFloat(newRentAmountStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(newRentWaterStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(newRentIptuStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(newRentGarbageStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(newRentLightStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(newRentFineStr.replace(",", ".")) || 0) - 
-                                   (((parseFloat(newRentAmountStr.replace(",", ".")) || 0) * (parseFloat(newRentAdminFeePercentStr.replace(",", ".")) || 0)) / 100)).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </span>
-                          </div>
+
+                          {newRentAdjustmentActive && (
+                            <div className="pt-2 border-t border-slate-200 space-y-2.5">
+                              {/* Mode Selector */}
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setNewRentAdjustmentMode("add")}
+                                  className={`py-1.5 px-2 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition cursor-pointer border ${
+                                    newRentAdjustmentMode === "add"
+                                      ? "bg-emerald-600 border-emerald-600 text-white shadow-xs"
+                                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <span>➕ Adicionar ao Valor (+)</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setNewRentAdjustmentMode("subtract")}
+                                  className={`py-1.5 px-2 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition cursor-pointer border ${
+                                    newRentAdjustmentMode === "subtract"
+                                      ? "bg-rose-600 border-rose-600 text-white shadow-xs"
+                                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <span>➖ Subtrair / Abater (-)</span>
+                                </button>
+                              </div>
+
+                              {/* Inputs: Amount and Reason */}
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <div className="sm:col-span-1 flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">
+                                    {newRentAdjustmentMode === "subtract" ? "Valor do Abatimento (R$)" : "Valor do Acréscimo (R$)"}
+                                  </label>
+                                  <input
+                                    type="text"
+                                    placeholder="0,00"
+                                    value={newRentAdjustmentAmountStr}
+                                    onChange={(e) => setNewRentAdjustmentAmountStr(e.target.value.replace(/[^0-9,.]/g, ""))}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-bold text-[11px] text-slate-800"
+                                  />
+                                </div>
+                                <div className="sm:col-span-2 flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">Observação / Motivo</label>
+                                  <input
+                                    type="text"
+                                    placeholder={newRentAdjustmentMode === "subtract" ? "Ex: Reembolso sacos de lixo (autorizado)" : "Ex: Parcela de acordo de dívida"}
+                                    value={newRentAdjustmentReason}
+                                    onChange={(e) => setNewRentAdjustmentReason(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px] text-slate-800"
+                                  />
+                                </div>
+                              </div>
+                              <p className="text-[9.5px] text-slate-400 italic">
+                                {newRentAdjustmentMode === "subtract"
+                                  ? "* Este valor será abatido do recebimento líquido sem gerar débito no sistema."
+                                  : "* Este valor será somado ao recebimento líquido sem alterar a base de cálculo da taxa de administração."}
+                              </p>
+                            </div>
+                          )}
                         </div>
+
+                        {/* PREVIEW MATH BLOCK */}
+                        {(() => {
+                          const rentVal = parseFloat(newRentAmountStr.replace(",", ".")) || 0;
+                          const waterVal = parseFloat(newRentWaterStr.replace(",", ".")) || 0;
+                          const iptuVal = parseFloat(newRentIptuStr.replace(",", ".")) || 0;
+                          const garbageVal = parseFloat(newRentGarbageStr.replace(",", ".")) || 0;
+                          const lightVal = parseFloat(newRentLightStr.replace(",", ".")) || 0;
+                          const fineVal = parseFloat(newRentFineStr.replace(",", ".")) || 0;
+                          const chargesVal = waterVal + iptuVal + garbageVal + lightVal + fineVal;
+                          const adminPercent = parseFloat(newRentAdminFeePercentStr.replace(",", ".")) || 0;
+                          const adminVal = (rentVal * adminPercent) / 100;
+                          const adjAmount = newRentAdjustmentActive ? (parseFloat(newRentAdjustmentAmountStr.replace(",", ".")) || 0) : 0;
+                          const baseNet = rentVal + chargesVal - adminVal;
+                          const netReceived = newRentAdjustmentMode === "subtract" ? baseNet - adjAmount : baseNet + adjAmount;
+
+                          return (
+                            <div className="bg-indigo-950 text-indigo-100 p-4 rounded-xl space-y-2 mt-4 shadow-sm">
+                              <div className="flex justify-between items-center text-[10px] uppercase font-bold tracking-wider opacity-90 border-b border-indigo-900 pb-1.5">
+                                <span>Resumo Detalhado</span>
+                                <span>Visualização Líquida</span>
+                              </div>
+                              <div className="space-y-1 font-mono text-[11px] opacity-80 leading-normal">
+                                <div className="flex justify-between">
+                                  <span>Aluguel:</span>
+                                  <span>R$ {rentVal.toFixed(2)}</span>
+                                </div>
+                                {chargesVal > 0 && (
+                                  <div className="flex justify-between">
+                                    <span>Encargos (Consumo/Tributos):</span>
+                                    <span>R$ {chargesVal.toFixed(2)}</span>
+                                  </div>
+                                )}
+                                {adminVal > 0 && (
+                                  <div className="flex justify-between text-rose-300">
+                                    <span>(-) Taxa Administração ({adminPercent}%):</span>
+                                    <span>- R$ {adminVal.toFixed(2)}</span>
+                                  </div>
+                                )}
+                                {adjAmount > 0 && (
+                                  <div className={`flex justify-between ${newRentAdjustmentMode === "subtract" ? "text-amber-300" : "text-emerald-300"}`}>
+                                    <span>{newRentAdjustmentMode === "subtract" ? "(-) Abatimento / Ajuste:" : "(+) Acréscimo / Ajuste:"}</span>
+                                    <span>{newRentAdjustmentMode === "subtract" ? "- " : "+ "}R$ {adjAmount.toFixed(2)}</span>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex justify-between items-center pt-2 border-t border-indigo-900 font-bold">
+                                <span className="text-xs uppercase">Recebimento Líquido</span>
+                                <span className="text-sm font-mono text-emerald-300">
+                                  R$ {netReceived.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                       </div>
 
@@ -6084,27 +9046,104 @@ export default function App() {
                           <span className="text-[10px] text-amber-600 mt-1">Este percentual da taxa de administração será cobrado sobre o valor base do aluguel.</span>
                         </div>
 
-                        {/* DEPOSIT (CAUÇÃO) SECTION */}
-                        <div className="flex flex-col bg-slate-50 p-3 rounded-lg border border-slate-205">
-                          <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-755 text-[11px] mb-1.5 select-none">
-                            <input
-                              type="checkbox"
-                              checked={editRentHasDeposit}
-                              onChange={(e) => {
-                                const checked = e.target.checked;
-                                setEditRentHasDeposit(checked);
-                                if (checked) {
+                        {/* GARANTIA LOCATÍCIA (CAUÇÃO / FIADOR / NENHUMA) */}
+                        <div className="flex flex-col bg-slate-50 p-3 rounded-xl border border-slate-205 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <label className="font-bold text-slate-700 text-[11px] flex items-center gap-1.5">
+                              <ShieldCheck size={13} className="text-indigo-600" />
+                              <span>Garantia Locatícia</span>
+                            </label>
+                            <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-slate-200">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditRentGuaranteeType("caucao");
+                                  setEditRentHasDeposit(true);
                                   const rentVal = parseFloat(editRentAmountStr.replace(",", ".")) || 0;
-                                  setEditRentDepositAmountStr((rentVal * editRentDepositMonths).toFixed(2).replace(".", ","));
-                                }
-                              }}
-                              className="h-3.5 w-3.5 rounded text-indigo-600 focus:ring-indigo-550 border-slate-300 cursor-pointer"
-                            />
-                            <span>Possui Caução de Garantia?</span>
-                          </label>
+                                  if (!editRentDepositAmountStr) {
+                                    setEditRentDepositAmountStr((rentVal * editRentDepositMonths).toFixed(2).replace(".", ","));
+                                  }
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  editRentGuaranteeType === "caucao" || (editRentHasDeposit && editRentGuaranteeType !== "fiador" && editRentGuaranteeType !== "nenhuma")
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Caução
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditRentGuaranteeType("fiador");
+                                  setEditRentHasDeposit(false);
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  editRentGuaranteeType === "fiador"
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Fiador
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditRentGuaranteeType("nenhuma");
+                                  setEditRentHasDeposit(false);
+                                }}
+                                className={`px-2 py-1 text-[10px] font-bold rounded-md transition cursor-pointer select-none ${
+                                  editRentGuaranteeType === "nenhuma" && !editRentHasDeposit
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "text-slate-500 hover:text-slate-800"
+                                }`}
+                              >
+                                Nenhuma
+                              </button>
+                            </div>
+                          </div>
 
-                          {editRentHasDeposit && (
-                            <div className="mt-1 space-y-3 pt-2.5 border-t border-slate-200 overflow-hidden">
+                          {/* FIADOR FORM */}
+                          {editRentGuaranteeType === "fiador" && (
+                            <div className="pt-2 border-t border-slate-200 space-y-2">
+                              <div className="flex flex-col">
+                                <label className="font-bold text-slate-500 mb-1 text-[10px]">Nome Completo do Fiador</label>
+                                <input
+                                  type="text"
+                                  placeholder="Ex: Carlos Eduardo de Oliveira"
+                                  value={editRentGuarantorName}
+                                  onChange={(e) => setEditRentGuarantorName(e.target.value)}
+                                  className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div className="flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">CPF do Fiador</label>
+                                  <input
+                                    type="text"
+                                    placeholder="000.000.000-00"
+                                    value={editRentGuarantorCpf}
+                                    onChange={(e) => setEditRentGuarantorCpf(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                  />
+                                </div>
+                                <div className="flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">Telefone / WhatsApp</label>
+                                  <input
+                                    type="text"
+                                    placeholder="(00) 00000-0000"
+                                    value={editRentGuarantorPhone}
+                                    onChange={(e) => setEditRentGuarantorPhone(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px]"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* CAUÇÃO FORM */}
+                          {(editRentGuaranteeType === "caucao" || editRentHasDeposit) && editRentGuaranteeType !== "fiador" && editRentGuaranteeType !== "nenhuma" && (
+                            <div className="mt-1 space-y-3 pt-2 border-t border-slate-200 overflow-hidden">
                               {/* Quantity of months selector */}
                               <div>
                                 <label className="block text-[10px] font-bold text-slate-500 mb-1">Quantidade de Meses do Aluguel</label>
@@ -6171,43 +9210,164 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* PREVIEW MATH BLOCK */}
-                        <div className="bg-slate-900 text-slate-100 p-4 rounded-xl space-y-2 mt-4 shadow-sm">
-                          <div className="flex justify-between items-center text-[10px] uppercase font-bold tracking-wider opacity-90 border-b border-slate-800 pb-1.5">
-                            <span>Resumo Detalhado (Editado)</span>
-                            <span>Visualização Líquida</span>
-                          </div>
-                          <div className="space-y-1 font-mono text-[11px] opacity-80 leading-normal">
-                            <div className="flex justify-between">
-                              <span>Aluguel:</span>
-                              <span>R$ {(parseFloat(editRentAmountStr.replace(",", ".")) || 0).toFixed(2)}</span>
+                        {/* BOTÃO DE AJUSTE DE VALOR (+ / -) */}
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 text-slate-700">
+                              <SlidersHorizontal size={14} className="text-indigo-600" />
+                              <span className="font-bold text-[11px]">Ajuste de Valor (+ / -)</span>
+                              {editRentAdjustmentActive && (
+                                <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                                  editRentAdjustmentMode === "subtract" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"
+                                }`}>
+                                  {editRentAdjustmentMode === "subtract" ? "Abatimento Ativo" : "Acréscimo Ativo"}
+                                </span>
+                              )}
                             </div>
-                            {((parseFloat(editRentWaterStr.replace(",", ".")) || 0) > 0 || (parseFloat(editRentIptuStr.replace(",", ".")) || 0) > 0 || (parseFloat(editRentLightStr.replace(",", ".")) || 0) > 0 || (parseFloat(editRentGarbageStr.replace(",", ".")) || 0) > 0 || (parseFloat(editRentFineStr.replace(",", ".")) || 0) > 0) && (
-                              <div className="flex justify-between">
-                                <span>Encargos (Consumo/Tributos):</span>
-                                <span>R$ {((parseFloat(editRentWaterStr.replace(",", ".")) || 0) + (parseFloat(editRentIptuStr.replace(",", ".")) || 0) + (parseFloat(editRentGarbageStr.replace(",", ".")) || 0) + (parseFloat(editRentLightStr.replace(",", ".")) || 0) + (parseFloat(editRentFineStr.replace(",", ".")) || 0)).toFixed(2)}</span>
-                              </div>
-                            )}
-                            {(parseFloat(editRentAdminFeePercentStr.replace(",", ".")) || 0) > 0 && (
-                              <div className="flex justify-between text-rose-350">
-                                <span>(-) Taxa Administração ({parseFloat(editRentAdminFeePercentStr.replace(",", "."))}%):</span>
-                                <span>- R$ {(((parseFloat(editRentAmountStr.replace(",", ".")) || 0) * (parseFloat(editRentAdminFeePercentStr.replace(",", ".")) || 0)) / 100).toFixed(2)}</span>
-                              </div>
+                            {!editRentAdjustmentActive ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditRentAdjustmentActive(true);
+                                  if (!editRentAdjustmentMode) setEditRentAdjustmentMode("add");
+                                }}
+                                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[10px] font-bold rounded-lg transition cursor-pointer flex items-center gap-1"
+                              >
+                                <Plus size={11} />
+                                <span>Adicionar Ajuste</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditRentAdjustmentActive(false);
+                                  setEditRentAdjustmentAmountStr("");
+                                  setEditRentAdjustmentReason("");
+                                }}
+                                className="px-2 py-0.5 bg-slate-200 hover:bg-rose-100 text-slate-600 hover:text-rose-700 text-[9px] font-bold rounded-md transition cursor-pointer"
+                                title="Desativar e remover ajuste de valor"
+                              >
+                                Remover Ajuste
+                              </button>
                             )}
                           </div>
-                          <div className="flex justify-between items-center pt-2 border-t border-slate-800 font-bold">
-                            <span className="text-xs uppercase">Recebimento Líquido</span>
-                            <span className="text-sm font-mono text-emerald-400">
-                              R$ {((parseFloat(editRentAmountStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(editRentWaterStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(editRentIptuStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(editRentGarbageStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(editRentLightStr.replace(",", ".")) || 0) + 
-                                   (parseFloat(editRentFineStr.replace(",", ".")) || 0) - 
-                                   (((parseFloat(editRentAmountStr.replace(",", ".")) || 0) * (parseFloat(editRentAdminFeePercentStr.replace(",", ".")) || 0)) / 100)).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </span>
-                          </div>
+
+                          {editRentAdjustmentActive && (
+                            <div className="pt-2 border-t border-slate-200 space-y-2.5">
+                              {/* Mode Selector */}
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditRentAdjustmentMode("add")}
+                                  className={`py-1.5 px-2 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition cursor-pointer border ${
+                                    editRentAdjustmentMode === "add"
+                                      ? "bg-emerald-600 border-emerald-600 text-white shadow-xs"
+                                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <span>➕ Adicionar ao Valor (+)</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditRentAdjustmentMode("subtract")}
+                                  className={`py-1.5 px-2 rounded-lg text-[10px] font-extrabold flex items-center justify-center gap-1 transition cursor-pointer border ${
+                                    editRentAdjustmentMode === "subtract"
+                                      ? "bg-rose-600 border-rose-600 text-white shadow-xs"
+                                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <span>➖ Subtrair / Abater (-)</span>
+                                </button>
+                              </div>
+
+                              {/* Inputs: Amount and Reason */}
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <div className="sm:col-span-1 flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">
+                                    {editRentAdjustmentMode === "subtract" ? "Valor do Abatimento (R$)" : "Valor do Acréscimo (R$)"}
+                                  </label>
+                                  <input
+                                    type="text"
+                                    placeholder="0,00"
+                                    value={editRentAdjustmentAmountStr}
+                                    onChange={(e) => setEditRentAdjustmentAmountStr(e.target.value.replace(/[^0-9,.]/g, ""))}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-bold text-[11px] text-slate-800"
+                                  />
+                                </div>
+                                <div className="sm:col-span-2 flex flex-col">
+                                  <label className="font-bold text-slate-500 mb-1 text-[10px]">Observação / Motivo</label>
+                                  <input
+                                    type="text"
+                                    placeholder={editRentAdjustmentMode === "subtract" ? "Ex: Reembolso sacos de lixo (autorizado)" : "Ex: Parcela de acordo de dívida"}
+                                    value={editRentAdjustmentReason}
+                                    onChange={(e) => setEditRentAdjustmentReason(e.target.value)}
+                                    className="bg-white border border-slate-200 focus:border-indigo-400 rounded-lg p-2 outline-none font-semibold text-[11px] text-slate-800"
+                                  />
+                                </div>
+                              </div>
+                              <p className="text-[9.5px] text-slate-400 italic">
+                                {editRentAdjustmentMode === "subtract"
+                                  ? "* Este valor será abatido do recebimento líquido do contrato sem gerar débitos indevidos."
+                                  : "* Este valor será somado ao recebimento líquido sem alterar a base de cálculo da taxa de administração."}
+                              </p>
+                            </div>
+                          )}
                         </div>
+
+                        {/* PREVIEW MATH BLOCK */}
+                        {(() => {
+                          const rentVal = parseFloat(editRentAmountStr.replace(",", ".")) || 0;
+                          const waterVal = parseFloat(editRentWaterStr.replace(",", ".")) || 0;
+                          const iptuVal = parseFloat(editRentIptuStr.replace(",", ".")) || 0;
+                          const garbageVal = parseFloat(editRentGarbageStr.replace(",", ".")) || 0;
+                          const lightVal = parseFloat(editRentLightStr.replace(",", ".")) || 0;
+                          const fineVal = parseFloat(editRentFineStr.replace(",", ".")) || 0;
+                          const chargesVal = waterVal + iptuVal + garbageVal + lightVal + fineVal;
+                          const adminPercent = parseFloat(editRentAdminFeePercentStr.replace(",", ".")) || 0;
+                          const adminVal = (rentVal * adminPercent) / 100;
+                          const adjAmount = editRentAdjustmentActive ? (parseFloat(editRentAdjustmentAmountStr.replace(",", ".")) || 0) : 0;
+                          const baseNet = rentVal + chargesVal - adminVal;
+                          const netReceived = editRentAdjustmentMode === "subtract" ? baseNet - adjAmount : baseNet + adjAmount;
+
+                          return (
+                            <div className="bg-slate-900 text-slate-100 p-4 rounded-xl space-y-2 mt-4 shadow-sm">
+                              <div className="flex justify-between items-center text-[10px] uppercase font-bold tracking-wider opacity-90 border-b border-slate-800 pb-1.5">
+                                <span>Resumo Detalhado (Editado)</span>
+                                <span>Visualização Líquida</span>
+                              </div>
+                              <div className="space-y-1 font-mono text-[11px] opacity-80 leading-normal">
+                                <div className="flex justify-between">
+                                  <span>Aluguel:</span>
+                                  <span>R$ {rentVal.toFixed(2)}</span>
+                                </div>
+                                {chargesVal > 0 && (
+                                  <div className="flex justify-between">
+                                    <span>Encargos (Consumo/Tributos):</span>
+                                    <span>R$ {chargesVal.toFixed(2)}</span>
+                                  </div>
+                                )}
+                                {adminVal > 0 && (
+                                  <div className="flex justify-between text-rose-350">
+                                    <span>(-) Taxa Administração ({adminPercent}%):</span>
+                                    <span>- R$ {adminVal.toFixed(2)}</span>
+                                  </div>
+                                )}
+                                {adjAmount > 0 && (
+                                  <div className={`flex justify-between ${editRentAdjustmentMode === "subtract" ? "text-amber-400" : "text-emerald-400"}`}>
+                                    <span>{editRentAdjustmentMode === "subtract" ? "(-) Abatimento / Ajuste:" : "(+) Acréscimo / Ajuste:"}</span>
+                                    <span>{editRentAdjustmentMode === "subtract" ? "- " : "+ "}R$ {adjAmount.toFixed(2)}</span>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex justify-between items-center pt-2 border-t border-slate-800 font-bold">
+                                <span className="text-xs uppercase">Recebimento Líquido</span>
+                                <span className="text-sm font-mono text-emerald-400">
+                                  R$ {netReceived.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                       </div>
 
@@ -6246,6 +9406,11 @@ export default function App() {
                 onCreate={handleCreateCategory}
                 onUpdate={handleUpdateCategory}
                 onDelete={handleDeleteCategory}
+                onOpenTransfer={(sourceCatId) => {
+                  setCategoryModalMode("transfer");
+                  setCategoryModalSourceId(sourceCatId || categories[0]?.id || "");
+                  setIsCategoryModalOpen(true);
+                }}
               />
             </div>
           ) : (
@@ -6700,10 +9865,839 @@ export default function App() {
         sgsError={sgsError}
       />
 
+      {/* RENTAL ADJUSTMENTS MANAGER MODAL */}
+      <AnimatePresence>
+        {managingAdjustmentsRental && (() => {
+          const rental = managingAdjustmentsRental;
+          const applicableAdjs = getRentalApplicableAdjustments(rental, activePeriodStr);
+          const allAdjs = rental.adjustments && Array.isArray(rental.adjustments)
+            ? rental.adjustments
+            : (rental.adjustmentAmount && rental.adjustmentAmount > 0
+                ? [{
+                    id: "legacy-adj-" + rental.id,
+                    mode: rental.adjustmentMode || "add",
+                    amount: rental.adjustmentAmount,
+                    description: rental.adjustmentReason || "Ajuste de valor",
+                    recurrence: "fixo" as const
+                  }]
+                : []);
+          const netAdj = getRentalAdjustmentsNetTotal(rental, activePeriodStr);
+          const expectedReceivable = getRentalExpectedAmount(rental, activePeriodStr);
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 text-slate-900 dark:text-slate-100 relative max-h-[92vh] flex flex-col">
+                {/* Header */}
+                <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100 dark:border-slate-800 flex-shrink-0">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-bold">
+                      <SlidersHorizontal size={18} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-md uppercase bg-indigo-150 text-indigo-800">
+                          {rental.lfCode}
+                        </span>
+                        <h3 className="text-base font-bold text-slate-900 dark:text-white truncate max-w-[240px]">
+                          {rental.tenantName}
+                        </h3>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        Ajustes de valor • Competência: <span className="font-semibold text-indigo-600 dark:text-indigo-400">{formatPeriodBRL(activePeriodStr)}</span>
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManagingAdjustmentsRental(null);
+                      setAdjFormAmountStr("");
+                      setAdjFormDesc("");
+                    }}
+                    className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Content body - scrollable */}
+                <div className="overflow-y-auto space-y-4 pr-1 flex-1 text-xs">
+                  {/* Summary bar */}
+                  <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/60 text-center">
+                    <div>
+                      <span className="text-[10px] text-slate-500 block uppercase font-medium">Aluguel Base</span>
+                      <span className="font-mono font-bold text-slate-800 dark:text-slate-200 text-xs">
+                        R$ {rental.rentAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block uppercase font-medium">Total Ajustes</span>
+                      <span className={`font-mono font-bold text-xs ${netAdj > 0 ? "text-emerald-600" : netAdj < 0 ? "text-rose-600" : "text-slate-500"}`}>
+                        {netAdj > 0 ? `+ R$ ${netAdj.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : netAdj < 0 ? `- R$ ${Math.abs(netAdj).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "R$ 0,00"}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 block uppercase font-medium">Líquido Mês</span>
+                      <span className="font-mono font-extrabold text-indigo-600 dark:text-indigo-400 text-xs">
+                        R$ {expectedReceivable.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* List of existing adjustments */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-700 dark:text-slate-300 text-[11px] uppercase tracking-wider">
+                        Ajustes Cadastrados ({allAdjs.length})
+                      </span>
+                      {allAdjs.length > 0 && (
+                        <span className="text-[10px] text-slate-400">
+                          {applicableAdjs.length} ativo(s) neste mês
+                        </span>
+                      )}
+                    </div>
+
+                    {allAdjs.length === 0 ? (
+                      <div className="p-4 text-center border border-dashed border-slate-200 dark:border-slate-700 rounded-xl bg-slate-50/50 dark:bg-slate-800/30 text-slate-400">
+                        Nenhum ajuste cadastrado para este imóvel. Use o formulário abaixo para adicionar.
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                        {allAdjs.map((adj) => {
+                          const isApplicableThisMonth = adj.recurrence === "fixo" || adj.targetPeriod === activePeriodStr;
+                          return (
+                            <div
+                              key={adj.id}
+                              className={`flex items-center justify-between p-2.5 rounded-xl border transition ${
+                                isApplicableThisMonth
+                                  ? adj.mode === "add"
+                                    ? "bg-emerald-50/40 border-emerald-200/70 dark:bg-emerald-950/20 dark:border-emerald-800/40"
+                                    : "bg-rose-50/40 border-rose-200/70 dark:bg-rose-950/20 dark:border-rose-800/40"
+                                  : "bg-slate-50 border-slate-200 opacity-60 dark:bg-slate-800/40 dark:border-slate-700"
+                              }`}
+                            >
+                              <div className="flex items-start gap-2 min-w-0 flex-1">
+                                <span className={`px-1.5 py-0.5 rounded-md font-extrabold text-[10px] ${
+                                  adj.mode === "add"
+                                    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300"
+                                    : "bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300"
+                                }`}>
+                                  {adj.mode === "add" ? "➕ Acréscimo" : "➖ Desconto"}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-bold text-slate-800 dark:text-white text-xs">
+                                      {adj.mode === "subtract" ? "-" : "+"} R$ {adj.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </span>
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
+                                      adj.recurrence === "fixo"
+                                        ? "bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-950/40 dark:text-blue-300"
+                                        : "bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300"
+                                    }`}>
+                                      {adj.recurrence === "fixo" ? "📌 Fixo (todo mês)" : `📅 Pontual (${adj.targetPeriod ? formatPeriodBRL(adj.targetPeriod) : "Mês atual"})`}
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate mt-0.5" title={adj.description}>
+                                    {adj.description}
+                                  </p>
+                                  {!isApplicableThisMonth && (
+                                    <span className="text-[9px] text-slate-400 italic">
+                                      Inativo nesta competência ({formatPeriodBRL(activePeriodStr)})
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveAdjustmentFromRental(rental.id, adj.id)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition ml-2 flex-shrink-0 cursor-pointer"
+                                title="Remover este ajuste"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Form to add a new adjustment */}
+                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-3">
+                    <span className="font-bold text-slate-700 dark:text-slate-300 text-[11px] uppercase tracking-wider block">
+                      + Adicionar Novo Ajuste
+                    </span>
+
+                    {/* Mode buttons */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setAdjFormMode("add")}
+                        className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                          adjFormMode === "add"
+                            ? "bg-emerald-50 border-emerald-500 text-emerald-800 shadow-xs ring-1 ring-emerald-500"
+                            : "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300"
+                        }`}
+                      >
+                        <span>➕</span>
+                        <span>Acréscimo (+)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAdjFormMode("subtract")}
+                        className={`py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                          adjFormMode === "subtract"
+                            ? "bg-rose-50 border-rose-500 text-rose-800 shadow-xs ring-1 ring-rose-500"
+                            : "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300"
+                        }`}
+                      >
+                        <span>➖</span>
+                        <span>Abatimento (-)</span>
+                      </button>
+                    </div>
+
+                    {/* Value and Description Inputs */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                          Valor do Ajuste (R$) *
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={adjFormAmountStr}
+                          onChange={(e) => setAdjFormAmountStr(e.target.value)}
+                          placeholder="0,00"
+                          className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                          Descrição / Motivo
+                        </label>
+                        <input
+                          type="text"
+                          value={adjFormDesc}
+                          onChange={(e) => setAdjFormDesc(e.target.value)}
+                          placeholder={adjFormMode === "add" ? "Ex: Manutenção acordada, Taxa extra..." : "Ex: Desconto de pintura, Reparo..."}
+                          className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Recurrence Selection: Pontual (some no próximo mês) vs Fixo */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                        Duração / Recorrência
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAdjFormRecurrence("pontual")}
+                          className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                            adjFormRecurrence === "pontual"
+                              ? "bg-indigo-50/70 border-indigo-500 ring-1 ring-indigo-500 text-indigo-950 font-bold"
+                              : "bg-slate-50/50 hover:bg-slate-100/60 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300"
+                          }`}
+                        >
+                          <div className="flex items-center gap-1 text-[11px]">
+                            <span>📅 Pontual</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug font-normal">
+                            Válido apenas em <strong>{formatPeriodBRL(activePeriodStr)}</strong>. Some no próximo mês.
+                          </p>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setAdjFormRecurrence("fixo")}
+                          className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                            adjFormRecurrence === "fixo"
+                              ? "bg-indigo-50/70 border-indigo-500 ring-1 ring-indigo-500 text-indigo-950 font-bold"
+                              : "bg-slate-50/50 hover:bg-slate-100/60 border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300"
+                          }`}
+                        >
+                          <div className="flex items-center gap-1 text-[11px]">
+                            <span>📌 Fixo Mensal</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug font-normal">
+                            Aplica em todos os meses futuros automaticamente.
+                          </p>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Add button */}
+                    <button
+                      type="button"
+                      onClick={() => handleAddAdjustmentToRental(rental.id)}
+                      className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer text-xs"
+                    >
+                      <Plus size={14} />
+                      <span>Inserir Ajuste no Imóvel</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="pt-3 mt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between flex-shrink-0">
+                  <span className="text-[11px] text-slate-400">
+                    Ajustes refletem instantaneamente no valor líquido a receber.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManagingAdjustmentsRental(null);
+                      setAdjFormAmountStr("");
+                      setAdjFormDesc("");
+                    }}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 font-bold text-slate-700 dark:text-slate-200 rounded-xl transition text-xs cursor-pointer"
+                  >
+                    Concluir / Fechar
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+      </AnimatePresence>
+
       {/* RENT RECEIPT DATE CONFIRMATION OVERLAY MODAL */}
       <AnimatePresence>
         {renderReceiptConfirmModal()}
       </AnimatePresence>
+
+      {/* OVERLAY MODAL: Quitar 2ª Parte do Aluguel (Saldo Devedor) */}
+      <AnimatePresence>
+        {payingShortfallRental && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setPayingShortfallRental(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
+            />
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl border border-slate-100 shadow-2xl w-full max-w-md relative z-10 p-6 flex flex-col"
+            >
+              <button
+                type="button"
+                onClick={() => setPayingShortfallRental(null)}
+                className="absolute right-4 top-4 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+              >
+                <X size={15} />
+              </button>
+
+              <div className="flex items-center gap-2 mb-2">
+                <span className="p-1.5 bg-emerald-50 text-emerald-700 rounded-lg">
+                  <Check size={16} />
+                </span>
+                <h3 className="font-bold text-sm text-slate-800">Quitar 2ª Parte do Aluguel</h3>
+              </div>
+
+              <p className="text-xs text-slate-500 mb-4 leading-normal">
+                Registre a data e a forma de pagamento do saldo devedor restante do imóvel <strong>{payingShortfallRental.lfCode}</strong> ({payingShortfallRental.tenantName}).
+              </p>
+
+              <div className="space-y-3.5 text-xs">
+                {/* Resumo do Contrato e 1ª Parte */}
+                <div className="bg-slate-50 border border-slate-150 p-3 rounded-xl space-y-1 bg-gradient-to-r from-slate-50 to-emerald-50/30">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-medium">Competência:</span>
+                    <span className="font-bold text-slate-800">{formatPeriodBRL(payingShortfallPeriod)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-medium">1ª Parte Recebida:</span>
+                    <span className="font-mono font-bold text-slate-700">
+                      R$ {(payingShortfallRental.paymentAmounts?.[payingShortfallPeriod] || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div className="flex justify-between border-t border-slate-200 pt-1 mt-1 font-semibold">
+                    <span className="text-amber-800">Saldo Devedor Restante:</span>
+                    <span className="text-amber-700 font-mono font-extrabold text-sm">
+                      R$ {(payingShortfallRental.paymentAdjustments?.[payingShortfallPeriod]?.difference || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Data do Recebimento da 2ª Parte */}
+                <div className="flex flex-col gap-1">
+                  <label className="font-bold text-slate-700">Data de Recebimento da 2ª Parte</label>
+                  <input
+                    type="date"
+                    value={payingShortfallDateInput}
+                    onChange={(e) => setPayingShortfallDateInput(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500/30 focus:border-emerald-500 text-xs text-slate-800 font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400">Pode ser outra data deste mesmo mês ou quando o inquilino efetivou o pagamento.</p>
+                </div>
+
+                {/* Valor Recebido na 2ª Parte */}
+                <div className="flex flex-col gap-1">
+                  <label className="font-bold text-slate-700">Valor Recebido na 2ª Parte (R$)</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={payingShortfallAmountInput}
+                    onChange={(e) => setPayingShortfallAmountInput(e.target.value)}
+                    placeholder="Ex: 500,00"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500/30 focus:border-emerald-500 text-xs text-slate-800 font-mono font-bold"
+                  />
+                </div>
+
+                {/* Forma de Pagamento */}
+                <div className="space-y-1.5">
+                  <label className="font-bold text-slate-700">Forma de Recebimento (2ª Parte)</label>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {RENTAL_PAYMENT_METHODS.map(m => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => setPayingShortfallPaymentMethod(m.id)}
+                        className={`py-1.5 px-2 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                          payingShortfallPaymentMethod === m.id
+                            ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
+                            : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+                        }`}
+                      >
+                        <span>{m.icon}</span>
+                        <span className="truncate">{m.label.split(" ")[0]}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Observação / Descrição */}
+                <div className="flex flex-col gap-1">
+                  <label className="font-bold text-slate-700 flex items-center justify-between">
+                    <span>Descrição / Observação</span>
+                    <span className="text-[10px] text-slate-400 font-normal">Opcional</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={payingShortfallObservation}
+                    onChange={(e) => setPayingShortfallObservation(e.target.value)}
+                    placeholder="Ex: Quitado via PIX na conta..."
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500/30 focus:border-emerald-500 text-xs text-slate-800"
+                  />
+                </div>
+
+                {/* Botões Salvar / Cancelar */}
+                <div className="flex gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setPayingShortfallRental(null)}
+                    className="flex-1 py-2 bg-slate-100 text-slate-650 hover:bg-slate-200/80 font-bold rounded-xl transition cursor-pointer text-center"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const amount = parseCurrencyInput(payingShortfallAmountInput);
+                      handleConfirmRentalShortfallPayment(
+                        payingShortfallRental,
+                        payingShortfallPeriod,
+                        payingShortfallDateInput,
+                        amount,
+                        payingShortfallPaymentMethod,
+                        payingShortfallObservation
+                      );
+                    }}
+                    className="flex-1 py-2 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs"
+                  >
+                    Confirmar Quitação
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* CONFIRMAÇÃO E AJUSTE DE VALOR/PAGAMENTO DE DESPESA/RECEITA FIXA */}
+      <AnimatePresence>
+        {confirmingFixedTpl && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-slate-900 dark:text-slate-100 relative">
+              <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm ${
+                    confirmingFixedTpl.type === "entrada" 
+                      ? "bg-emerald-100 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400" 
+                      : "bg-rose-100 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400"
+                  }`}>
+                    {confirmingFixedTpl.type === "entrada" ? "↓" : "↑"}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold">
+                      Confirmar Lançamento {confirmingFixedTpl.type === "entrada" ? "da Receita" : "da Despesa"}
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Ajuste o valor real e a forma de pagamento antes de lançar
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingFixedTpl(null)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-4 text-sm">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                    Descrição do Lançamento
+                  </label>
+                  <div className="p-2.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 font-medium">
+                    {confirmingFixedTpl.description}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                      Valor Real (R$)
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={confirmFixedAmountStr}
+                      onChange={(e) => setConfirmFixedAmountStr(e.target.value)}
+                      placeholder="0,00"
+                      autoFocus
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-0.5 block">Altere os centavos se necessário</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                      Data no Extrato
+                    </label>
+                    <input
+                      type="date"
+                      value={confirmFixedDate}
+                      onChange={(e) => setConfirmFixedDate(e.target.value)}
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                    Forma de Pagamento
+                  </label>
+                  <select
+                    value={confirmFixedPaymentMethod}
+                    onChange={(e) => setConfirmFixedPaymentMethod(e.target.value as any)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                  >
+                    <option value="dinheiro">💵 Dinheiro em Espécie</option>
+                    <option value="pix">⚡ PIX</option>
+                    <option value="cartao_credito">💳 Cartão de Crédito</option>
+                    <option value="cartao_debito">💳 Cartão de Débito</option>
+                    <option value="boleto">📄 Boleto Bancário</option>
+                    <option value="outros">🔄 Outros / Transferência</option>
+                  </select>
+                </div>
+
+                {confirmFixedPaymentMethod === "cartao_credito" && (
+                  <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl space-y-2">
+                    <label className="block text-xs font-semibold text-amber-800 dark:text-amber-300">
+                      Qual Cartão de Crédito foi utilizado?
+                    </label>
+                    {creditCards.length === 0 ? (
+                      <p className="text-xs text-amber-700 dark:text-amber-400">
+                        Nenhum cartão cadastrado ainda. Cadastre seus cartões na aba "Cartões & Faturas".
+                      </p>
+                    ) : (
+                      <select
+                        value={confirmFixedCardId}
+                        onChange={(e) => setConfirmFixedCardId(e.target.value)}
+                        className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-amber-500 outline-none text-xs"
+                      >
+                        {creditCards.map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.name} {c.lastFourDigits ? `(•••• ${c.lastFourDigits})` : ""} - Fecha dia {c.closingDay}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
+
+                {/* Alerta de lançamento já existente no mês selecionado */}
+                {(() => {
+                  const targetYear = confirmFixedDate.split("-")[0];
+                  const targetMonth = confirmFixedDate.split("-")[1];
+                  const existingTx = getPostedTxForFixed(confirmingFixedTpl, targetYear, targetMonth);
+                  if (existingTx) {
+                    return (
+                      <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl space-y-1.5">
+                        <div className="flex items-start gap-2">
+                          <span className="text-amber-600 text-sm">⚠️</span>
+                          <div className="text-xs">
+                            <p className="font-bold text-amber-900 dark:text-amber-200">
+                              Já existe lançamento deste fixo neste mês ({existingTx.date.split("-").reverse().join("/")} - R$ {existingTx.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}).
+                            </p>
+                            <label className="flex items-center gap-2 mt-1.5 cursor-pointer font-medium text-slate-700 dark:text-slate-300">
+                              <input
+                                type="checkbox"
+                                checked={confirmFixedUpdateExistingTx}
+                                onChange={(e) => setConfirmFixedUpdateExistingTx(e.target.checked)}
+                                className="rounded text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span>Atualizar o lançamento já feito no extrato (em vez de duplicar)</span>
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* Opção para atualizar o valor base cadastrado */}
+                <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-indigo-700 dark:text-indigo-300">
+                    <input
+                      type="checkbox"
+                      checked={confirmFixedUpdateTemplate}
+                      onChange={(e) => setConfirmFixedUpdateTemplate(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>Atualizar também o valor base deste modelo fixo para R$ {confirmFixedAmountStr || "0,00"}</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 mt-6 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setConfirmingFixedTpl(null)}
+                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmLaunchFixed}
+                  className="px-5 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 rounded-xl shadow-md shadow-emerald-600/20 transition flex items-center gap-1.5"
+                >
+                  <span>✓</span>
+                  <span>Confirmar e Lançar</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL DE EDIÇÃO DO MODELO FIXO CADASTRADO E LANÇAMENTO NO MÊS */}
+      <AnimatePresence>
+        {editingFixedTpl && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-slate-900 dark:text-slate-100 relative">
+              <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm ${
+                    editingFixedTpl.type === "entrada"
+                      ? "bg-emerald-100 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400"
+                      : "bg-rose-100 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400"
+                  }`}>
+                    <Edit2 size={15} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold">
+                      Editar {editingFixedTpl.type === "entrada" ? "Renda Fixa" : "Despesa Fixa"} Cadastrada
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Altere o valor base, vencimento e dados da recorrência
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingFixedTpl(null)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-4 text-sm">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                    Descrição da Recorrência
+                  </label>
+                  <input
+                    type="text"
+                    value={editFixedDesc}
+                    onChange={(e) => setEditFixedDesc(e.target.value)}
+                    placeholder="Ex: Aluguel do Galpão, Salário, Internet..."
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                      Valor Base Padrão (R$)
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={editFixedAmountStr}
+                      onChange={(e) => setEditFixedAmountStr(e.target.value)}
+                      placeholder="0,00"
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                      Dia do Vencimento
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={31}
+                      value={editFixedDueDay}
+                      onChange={(e) => setEditFixedDueDay(Math.min(31, Math.max(1, Number(e.target.value) || 1)))}
+                      className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                    Categoria
+                  </label>
+                  <select
+                    value={editFixedCategory}
+                    onChange={(e) => setEditFixedCategory(e.target.value)}
+                    className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                  >
+                    {categories
+                      .filter(c => c.type === editingFixedTpl.type)
+                      .map(cat => (
+                        <option key={cat.id} value={cat.name}>
+                          {cat.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {/* Sincronização com lançamento do mês se existir */}
+                {(() => {
+                  const targetYear = filterYear !== "todos" ? filterYear : String(new Date().getFullYear());
+                  const targetMonth = filterMonth !== "todos" ? filterMonth : String(new Date().getMonth() + 1).padStart(2, "0");
+                  const existingTx = getPostedTxForFixed(editingFixedTpl, targetYear, targetMonth);
+                  
+                  if (existingTx) {
+                    return (
+                      <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl">
+                        <div className="flex items-start gap-2">
+                          <CheckCircle2 size={16} className="text-emerald-600 mt-0.5 shrink-0" />
+                          <div className="text-xs">
+                            <p className="font-bold text-emerald-900 dark:text-emerald-200">
+                              Lançamento encontrado no extrato deste mês ({targetMonth}/{targetYear}):
+                            </p>
+                            <p className="text-emerald-800 dark:text-emerald-300 mt-0.5">
+                              Data: {existingTx.date.split("-").reverse().join("/")} | Valor atual: R$ {existingTx.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                            </p>
+                            <label className="flex items-center gap-2 mt-2 cursor-pointer font-semibold text-emerald-950 dark:text-emerald-100">
+                              <input
+                                type="checkbox"
+                                checked={editFixedUpdateMonthTx}
+                                onChange={(e) => setEditFixedUpdateMonthTx(e.target.checked)}
+                                className="rounded text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span>Atualizar também o valor deste lançamento já lançado no mês</span>
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 mt-6 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingFixedTpl(null)}
+                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveEditFixed}
+                  className="px-5 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-xl shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5"
+                >
+                  <Check size={14} />
+                  <span>Salvar Alterações</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Category Bulk Transfer and Interactive Deletion Modal */}
+      <CategoryBulkTransferModal
+        isOpen={isCategoryModalOpen}
+        mode={categoryModalMode}
+        initialSourceCategoryId={categoryModalSourceId}
+        categories={categories}
+        transactions={transactions}
+        fixedTemplates={fixedTemplates}
+        onClose={() => setIsCategoryModalOpen(false)}
+        onTransfer={handleBulkTransferCategory}
+        onDeleteCategory={handleConfirmDeleteCategory}
+      />
+
+      {/* Category Selection Modal on Save Entrada / Saida */}
+      <CategorySelectionModal
+        isOpen={categorySelectionModal.isOpen}
+        type={categorySelectionModal.type}
+        selectedCategory={categorySelectionModal.selectedCategory}
+        categories={categories}
+        transactionSummary={{
+          description: formDescription.trim(),
+          amount: parseCurrencyInput(formAmountStr) || 0,
+          date: formDate,
+          paymentMethod: formPaymentMethod,
+          installmentsCount: formPaymentMethod === "cartao_credito" ? formInstallmentsCount : 1
+        }}
+        onSelectCategory={(catName) =>
+          setCategorySelectionModal(prev => ({ ...prev, selectedCategory: catName }))
+        }
+        onConfirm={handleConfirmCategoryAndSave}
+        onClose={() => setCategorySelectionModal(prev => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* APP UPDATE MODAL & CHANGELOG VIEWER */}
+      <AppUpdateModal
+        isOpen={isUpdateModalOpen}
+        onClose={() => setIsUpdateModalOpen(false)}
+        updateInfo={updateInfo}
+        isLoading={isCheckingUpdate}
+        onCheckAgain={(simulate) => checkForUpdates(simulate, true)}
+        onSnooze={handleSnoozeUpdate}
+        onDismissVersion={handleDismissVersion}
+      />
 
     </div>
   );

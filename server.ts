@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
 
 async function startServer() {
@@ -368,6 +369,182 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
           error: "Erro crítico ao carregar as taxas de correção oficial.",
         });
       }
+    }
+  });
+
+  // Helpers for semantic version comparison
+  function parseVersionParts(versionStr: string): number[] {
+    const cleaned = (versionStr || "").replace(/^v/i, "").trim();
+    const mainPart = cleaned.split("-")[0];
+    return mainPart.split(".").map(part => parseInt(part, 10) || 0);
+  }
+
+  function isNewerVersion(remoteVersion: string, currentVersion: string): boolean {
+    const remote = parseVersionParts(remoteVersion);
+    const current = parseVersionParts(currentVersion);
+    for (let i = 0; i < Math.max(remote.length, current.length); i++) {
+      const r = remote[i] || 0;
+      const c = current[i] || 0;
+      if (r > c) return true;
+      if (r < c) return false;
+    }
+    return false;
+  }
+
+  // API Route: Check for application updates (GitHub Releases & Fallback Manifest)
+  app.get("/api/app-update/check", async (req: express.Request, res: express.Response) => {
+    try {
+      const simulate = req.query.simulate === "true";
+      
+      // Read current local package version
+      let currentVersion = "1.0.6";
+      try {
+        const pkgPath = path.join(process.cwd(), "package.json");
+        if (fs.existsSync(pkgPath)) {
+          const pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+          if (pkgData.version) currentVersion = pkgData.version;
+        }
+      } catch (err) {
+        console.warn("Could not read package.json version:", err);
+      }
+
+      if (simulate) {
+        res.json({
+          hasUpdate: true,
+          currentVersion,
+          latestVersion: "1.0.7",
+          releaseName: "Versão 1.0.7 - Atualização de Recursos & Notificações",
+          releaseNotes: "### 🚀 O que mudou nesta versão:\n- **Verificador de Atualizações Automático**: O sistema agora avisa você quando houver novas versões disponíveis no repositório caixaatt.\n- **Transparência de Mudanças**: Veja as notas de atualização completas antes de decidir se deseja atualizar ou adiar.\n- **Melhorias no Fluxo de Caixa**: Otimizações nos demonstrativos financeiros e relatórios.\n- **Maior Estabilidade**: Correções pontuais e melhorias de performance.",
+          publishedAt: new Date().toISOString(),
+          downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
+          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.7.exe",
+          installerSize: 89432000,
+          isSimulated: true,
+          checkedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      const GITHUB_REPO = "desvendandooincrivel-ai/caixaatt";
+      
+      // 1. First, check version.json or update.json directly in the caixaatt repository
+      const manifestCandidates = [
+        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/version.json`,
+        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/update.json`,
+        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/latest.json`
+      ];
+
+      let manifest: any = null;
+      for (const manifestUrl of manifestCandidates) {
+        try {
+          const mRes = await fetch(manifestUrl, {
+            headers: { 
+              "User-Agent": "ControleDeCaixa-App",
+              "Cache-Control": "no-cache"
+            }
+          });
+          if (mRes.ok) {
+            manifest = await mRes.json();
+            break;
+          }
+        } catch (_) {}
+      }
+
+      // If remote manifest exists in caixaatt
+      if (manifest && manifest.version) {
+        const latestVersion = String(manifest.version).replace(/^v/i, "");
+        const hasUpdate = isNewerVersion(latestVersion, currentVersion);
+        const changelogText = Array.isArray(manifest.changelog)
+          ? manifest.changelog.map((item: string) => `- ${item}`).join("\n")
+          : (manifest.changelog || manifest.notes || "Atualizações e melhorias gerais.");
+
+        const fallbackDownloadUrl = manifest.downloadUrl || manifest.installerUrl || `https://github.com/${GITHUB_REPO}/raw/main/Controle-de-Caixa-Setup-${latestVersion}.exe`;
+
+        res.json({
+          hasUpdate,
+          currentVersion,
+          latestVersion,
+          releaseName: manifest.title || manifest.name || `Versão ${latestVersion}`,
+          releaseNotes: changelogText,
+          publishedAt: manifest.releaseDate || manifest.date || new Date().toISOString(),
+          downloadUrl: `https://github.com/${GITHUB_REPO}`,
+          installerUrl: fallbackDownloadUrl,
+          installerSize: manifest.size || null,
+          source: "caixaatt_manifest",
+          isSimulated: false,
+          checkedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      // 2. Next, check GitHub Releases of caixaatt
+      const releasesUrl = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+      let remoteRelease: any = null;
+      try {
+        const ghResponse = await fetch(releasesUrl, {
+          headers: {
+            "User-Agent": "ControleDeCaixa-App",
+            "Accept": "application/vnd.github.v3+json",
+            "Cache-Control": "no-cache"
+          }
+        });
+        if (ghResponse.ok) {
+          remoteRelease = await ghResponse.json();
+        }
+      } catch (fetchErr) {
+        console.warn("GitHub releases check failed:", fetchErr);
+      }
+
+      // If GitHub release exists in caixaatt
+      if (remoteRelease && remoteRelease.tag_name) {
+        const latestVersion = remoteRelease.tag_name.replace(/^v/i, "");
+        const hasUpdate = isNewerVersion(latestVersion, currentVersion);
+        
+        let installerUrl: string | null = null;
+        let installerSize: number | null = null;
+        if (Array.isArray(remoteRelease.assets)) {
+          const exeAsset = remoteRelease.assets.find((a: any) => a.name?.endsWith(".exe"));
+          if (exeAsset) {
+            installerUrl = exeAsset.browser_download_url;
+            installerSize = exeAsset.size;
+          }
+        }
+
+        res.json({
+          hasUpdate,
+          currentVersion,
+          latestVersion,
+          releaseName: remoteRelease.name || `Versão ${latestVersion}`,
+          releaseNotes: remoteRelease.body || "Atualizações e melhorias gerais de estabilidade.",
+          publishedAt: remoteRelease.published_at,
+          downloadUrl: remoteRelease.html_url || `https://github.com/${GITHUB_REPO}/releases`,
+          installerUrl: installerUrl || remoteRelease.html_url,
+          installerSize,
+          source: "caixaatt_release",
+          isSimulated: false,
+          checkedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      // 3. No newer release or repo is pending initial upload
+      res.json({
+        hasUpdate: false,
+        currentVersion,
+        latestVersion: currentVersion,
+        releaseName: `Versão ${currentVersion}`,
+        releaseNotes: "Seu aplicativo está rodando a versão mais recente disponível.",
+        publishedAt: new Date().toISOString(),
+        downloadUrl: `https://github.com/${GITHUB_REPO}`,
+        installerUrl: null,
+        installerSize: null,
+        source: "caixaatt_empty",
+        isSimulated: false,
+        checkedAt: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error("Erro na verificação de atualização:", err);
+      res.status(500).json({ error: "Erro ao verificar atualizações." });
     }
   });
 

@@ -1,0 +1,12 @@
+{
+  "version": "1.0.7",
+  "releaseDate": "2026-10-14",
+  "title": "Versão 1.0.7 - Atualizador Automático & Melhorias",
+  "changelog": [
+    "Sistema de busca por atualização automática integrado ao GitHub Releases (caixaatt)",
+    "Notificação interativa de nova versão com resumo completo de mudanças",
+    "Liberdade para o usuário decidir quando atualizar ou adiar",
+    "Otimizações de performance no fluxo de caixa e relatórios"
+  ],
+  "downloadUrl": "https://github.com/desvendandooincrivel-ai/caixaatt/releases/latest"
+}
