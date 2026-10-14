@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { GoogleGenAI } from "@google/genai";
 
 async function startServer() {
@@ -545,6 +546,163 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
     } catch (err: any) {
       console.error("Erro na verificação de atualização:", err);
       res.status(500).json({ error: "Erro ao verificar atualizações." });
+    }
+  });
+
+  // State for in-app download progress
+  let downloadState: {
+    status: "idle" | "downloading" | "ready_to_install" | "error";
+    percent: number;
+    transferred: number;
+    total: number;
+    filePath: string | null;
+    error: string | null;
+  } = {
+    status: "idle",
+    percent: 0,
+    transferred: 0,
+    total: 0,
+    filePath: null,
+    error: null,
+  };
+
+  // API Route: Trigger download inside the app
+  app.post("/api/app-update/download", async (req: express.Request, res: express.Response) => {
+    try {
+      const { installerUrl, version, isSimulated } = req.body;
+
+      if (!installerUrl && !isSimulated) {
+        res.status(400).json({ error: "URL do instalador não informada." });
+        return;
+      }
+
+      // If simulated mode, simulate a live download progress
+      if (isSimulated) {
+        downloadState = {
+          status: "downloading",
+          percent: 0,
+          transferred: 0,
+          total: 115000000,
+          filePath: path.join(os.tmpdir(), `Controle-de-Caixa-Setup-${version || "1.0.7"}.exe`),
+          error: null,
+        };
+        res.json({ message: "Download simulado iniciado." });
+
+        let currentPercent = 0;
+        const interval = setInterval(() => {
+          currentPercent += 15;
+          if (currentPercent >= 100) {
+            downloadState.percent = 100;
+            downloadState.transferred = downloadState.total;
+            downloadState.status = "ready_to_install";
+            clearInterval(interval);
+          } else {
+            downloadState.percent = currentPercent;
+            downloadState.transferred = Math.round((currentPercent / 100) * downloadState.total);
+          }
+        }, 600);
+        return;
+      }
+
+      const tempDir = os.tmpdir();
+      const fileName = `Controle-de-Caixa-Setup-${version || "update"}.exe`;
+      const targetFilePath = path.join(tempDir, fileName);
+
+      downloadState = {
+        status: "downloading",
+        percent: 0,
+        transferred: 0,
+        total: 0,
+        filePath: targetFilePath,
+        error: null,
+      };
+
+      res.json({ message: "Download iniciado em segundo plano.", targetFilePath });
+
+      // Start actual download in background
+      (async () => {
+        try {
+          const fetchRes = await fetch(installerUrl, {
+            headers: { "User-Agent": "ControleDeCaixa-App" }
+          });
+
+          if (!fetchRes.ok || !fetchRes.body) {
+            throw new Error(`Falha ao baixar arquivo HTTP ${fetchRes.status}: ${fetchRes.statusText}`);
+          }
+
+          const contentLength = Number(fetchRes.headers.get("content-length")) || 0;
+          downloadState.total = contentLength;
+
+          const fileStream = fs.createWriteStream(targetFilePath);
+          const reader = fetchRes.body.getReader();
+
+          let receivedBytes = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            receivedBytes += value.length;
+            fileStream.write(Buffer.from(value));
+
+            receivedBytes += 0;
+            downloadState.transferred = receivedBytes;
+            if (contentLength > 0) {
+              downloadState.percent = Math.min(100, Math.round((receivedBytes / contentLength) * 100));
+            }
+          }
+
+          fileStream.end();
+          downloadState.status = "ready_to_install";
+          downloadState.percent = 100;
+        } catch (downloadErr: any) {
+          console.error("Erro durante o download da atualização:", downloadErr);
+          downloadState.status = "error";
+          downloadState.error = downloadErr.message || "Erro desconhecido durante o download.";
+        }
+      })();
+    } catch (err: any) {
+      console.error("Erro ao iniciar download:", err);
+      res.status(500).json({ error: "Erro ao processar download." });
+    }
+  });
+
+  // API Route: Query current download progress
+  app.get("/api/app-update/download-status", (req: express.Request, res: express.Response) => {
+    res.json(downloadState);
+  });
+
+  // API Route: Execute downloaded installer and close app
+  app.post("/api/app-update/install", async (req: express.Request, res: express.Response) => {
+    try {
+      if (downloadState.status !== "ready_to_install" || !downloadState.filePath) {
+        res.status(400).json({ error: "Nenhum instalador pronto para instalação." });
+        return;
+      }
+
+      const installerPath = downloadState.filePath;
+      if (!fs.existsSync(installerPath)) {
+        res.status(404).json({ error: "O arquivo do instalador não foi encontrado no disco." });
+        return;
+      }
+
+      console.log("Iniciando instalador da atualização:", installerPath);
+      res.json({ success: true, message: "Instalador iniciado com sucesso. O aplicativo será encerrado para aplicar a atualização." });
+
+      // Launch the installer detached
+      const { spawn } = await import("child_process");
+      const child = spawn(installerPath, [], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+
+      // Exit process after brief delay so client receives response
+      setTimeout(() => {
+        process.exit(0);
+      }, 1500);
+    } catch (err: any) {
+      console.error("Erro ao executar instalador:", err);
+      res.status(500).json({ error: "Falha ao iniciar o instalador." });
     }
   });
 

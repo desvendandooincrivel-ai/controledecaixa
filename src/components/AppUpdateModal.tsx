@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Download,
   Sparkles,
@@ -12,7 +12,8 @@ import {
   ChevronRight,
   ArrowRight,
   FileText,
-  Laptop
+  Play,
+  RotateCcw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -49,7 +50,18 @@ export function AppUpdateModal({
   onSnooze,
   onDismissVersion
 }: AppUpdateModalProps) {
-  const [downloadStarted, setDownloadStarted] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState<"idle" | "downloading" | "ready_to_install" | "installing" | "error">("idle");
+  const [downloadPercent, setDownloadPercent] = useState<number>(0);
+  const [downloadTransferred, setDownloadTransferred] = useState<number>(0);
+  const [downloadTotal, setDownloadTotal] = useState<number>(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -58,7 +70,7 @@ export function AppUpdateModal({
   const latestVersion = updateInfo?.latestVersion || currentVersion;
   const releaseName = updateInfo?.releaseName || `Versão ${latestVersion}`;
   const releaseNotes = updateInfo?.releaseNotes || "";
-  const downloadUrl = updateInfo?.installerUrl || updateInfo?.downloadUrl || "https://github.com/desvendandooincrivel-ai/controledecaixa/releases";
+  const downloadUrl = updateInfo?.installerUrl || updateInfo?.downloadUrl || "https://github.com/desvendandooincrivel-ai/caixaatt/releases/latest";
 
   const formatFileSize = (bytes?: number | null) => {
     if (!bytes || bytes <= 0) return null;
@@ -80,9 +92,73 @@ export function AppUpdateModal({
     }
   };
 
-  const handleStartUpdate = () => {
-    setDownloadStarted(true);
-    window.open(downloadUrl, "_blank");
+  const handleStartInAppDownload = async () => {
+    setDownloadStatus("downloading");
+    setDownloadPercent(0);
+    setErrorMessage(null);
+
+    try {
+      const res = await fetch("/api/app-update/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          installerUrl: downloadUrl,
+          version: latestVersion,
+          isSimulated: !!updateInfo?.isSimulated
+        })
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Falha ao iniciar o download da atualização.");
+      }
+
+      // Start polling download status
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
+      pollTimerRef.current = setInterval(async () => {
+        try {
+          const statusRes = await fetch("/api/app-update/download-status");
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            setDownloadPercent(statusData.percent || 0);
+            setDownloadTransferred(statusData.transferred || 0);
+            setDownloadTotal(statusData.total || 0);
+
+            if (statusData.status === "ready_to_install") {
+              setDownloadStatus("ready_to_install");
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+            } else if (statusData.status === "error") {
+              setDownloadStatus("error");
+              setErrorMessage(statusData.error || "Erro durante o download da atualização.");
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+            }
+          }
+        } catch (pollErr) {
+          console.warn("Erro ao consultar progresso:", pollErr);
+        }
+      }, 400);
+
+    } catch (err: any) {
+      setDownloadStatus("error");
+      setErrorMessage(err.message || "Não foi possível baixar o instalador.");
+    }
+  };
+
+  const handleInstallAndRestart = async () => {
+    setDownloadStatus("installing");
+    try {
+      const res = await fetch("/api/app-update/install", {
+        method: "POST"
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Falha ao iniciar o instalador.");
+      }
+    } catch (err: any) {
+      setDownloadStatus("error");
+      setErrorMessage(err.message || "Erro ao executar o instalador.");
+    }
   };
 
   // Render formatted release notes lines
@@ -116,7 +192,6 @@ export function AppUpdateModal({
           // Bullet points (- or *)
           if (trimmed.startsWith("-") || trimmed.startsWith("*")) {
             const rawItem = trimmed.replace(/^[-*]\s*/, "");
-            // Split bold tags if present
             const parts = rawItem.split(/(\*\*.*?\*\*)/g);
 
             return (
@@ -252,10 +327,114 @@ export function AppUpdateModal({
                 {updateInfo?.isSimulated && (
                   <div className="p-2 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800 flex items-center gap-2">
                     <AlertCircle size={14} className="shrink-0 text-amber-600" />
-                    <span>Esta é uma simulação de demonstração para você testar a interface de atualização.</span>
+                    <span>Modo Simulação ativado para testar o download e instalação no app.</span>
                   </div>
                 )}
               </div>
+            )}
+
+            {/* IN-APP DOWNLOAD PROGRESS SECTION */}
+            {downloadStatus === "downloading" && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-5 rounded-2xl bg-indigo-50/90 border border-indigo-200 space-y-3"
+              >
+                <div className="flex items-center justify-between text-xs font-bold text-indigo-950">
+                  <span className="flex items-center gap-2">
+                    <RefreshCw size={14} className="animate-spin text-indigo-600" />
+                    <span>Baixando atualização diretamente no app...</span>
+                  </span>
+                  <span className="font-mono text-sm font-black text-indigo-700">{downloadPercent}%</span>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full bg-indigo-200/60 h-3 rounded-full overflow-hidden p-0.5">
+                  <motion.div
+                    className="bg-gradient-to-r from-indigo-600 to-emerald-500 h-full rounded-full transition-all duration-300"
+                    style={{ width: `${downloadPercent}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-indigo-800/80 font-mono">
+                  <span>
+                    {downloadTransferred > 0 ? formatFileSize(downloadTransferred) : "Conectando..."}
+                    {downloadTotal > 0 ? ` de ${formatFileSize(downloadTotal)}` : ""}
+                  </span>
+                  <span>Por favor, aguarde...</span>
+                </div>
+              </motion.div>
+            )}
+
+            {/* READY TO INSTALL BANNER */}
+            {downloadStatus === "ready_to_install" && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="p-5 rounded-2xl bg-emerald-50 border border-emerald-300 text-emerald-950 space-y-2 shadow-xs"
+              >
+                <div className="flex items-center gap-2 font-black text-sm text-emerald-900">
+                  <CheckCircle2 size={18} className="text-emerald-600 stroke-[2.5]" />
+                  <span>Download concluído com sucesso!</span>
+                </div>
+                <p className="text-xs text-emerald-800 leading-relaxed">
+                  O instalador da nova versão já está no seu computador. Clique no botão <strong>"Instalar e Reiniciar Agora"</strong> para aplicar a atualização.
+                </p>
+                <p className="text-[11px] text-emerald-700/90 font-medium">
+                  🔒 <em>Seus caixas, categorias e lançamentos continuam 100% seguros e intactos.</em>
+                </p>
+              </motion.div>
+            )}
+
+            {/* INSTALLING SPINNER BANNER */}
+            {downloadStatus === "installing" && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="p-5 rounded-2xl bg-blue-50 border border-blue-200 text-blue-950 text-center space-y-2"
+              >
+                <RefreshCw size={24} className="animate-spin text-blue-600 mx-auto" />
+                <h4 className="font-bold text-sm text-blue-900">Iniciando o instalador...</h4>
+                <p className="text-xs text-blue-700">
+                  O aplicativo será encerrado em instantes para que a instalação seja concluída.
+                </p>
+              </motion.div>
+            )}
+
+            {/* ERROR BANNER */}
+            {downloadStatus === "error" && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-950 space-y-2"
+              >
+                <div className="flex items-center gap-2 font-bold text-xs text-rose-800">
+                  <AlertCircle size={16} className="text-rose-600" />
+                  <span>Erro ao baixar atualização</span>
+                </div>
+                <p className="text-xs text-rose-700 leading-relaxed">
+                  {errorMessage || "Ocorreu uma falha na conexão. Você pode tentar novamente ou baixar o instalador pelo navegador."}
+                </p>
+                <div className="pt-1 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleStartInAppDownload}
+                    className="text-xs font-bold text-rose-800 underline hover:text-rose-950 cursor-pointer flex items-center gap-1"
+                  >
+                    <RotateCcw size={12} />
+                    <span>Tentar Novamente</span>
+                  </button>
+                  <a
+                    href={downloadUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-bold text-indigo-700 underline hover:text-indigo-950 flex items-center gap-1"
+                  >
+                    <span>Baixar pelo Navegador</span>
+                    <ExternalLink size={11} />
+                  </a>
+                </div>
+              </motion.div>
             )}
 
             {/* Changes / Release Notes Section */}
@@ -268,30 +447,10 @@ export function AppUpdateModal({
                 <span className="text-[10px] font-bold text-slate-400">Notas de Atualização</span>
               </div>
 
-              <div className="p-4 bg-slate-50/80 rounded-2xl border border-slate-200/70 max-h-56 overflow-y-auto">
+              <div className="p-4 bg-slate-50/80 rounded-2xl border border-slate-200/70 max-h-52 overflow-y-auto">
                 {renderChangelog(releaseNotes)}
               </div>
             </div>
-
-            {/* If user clicked download, display friendly instructions */}
-            {downloadStarted && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="p-4 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-950 space-y-2"
-              >
-                <div className="flex items-center gap-2 font-bold text-xs text-indigo-900">
-                  <CheckCircle2 size={16} className="text-indigo-600" />
-                  <span>Download iniciado com sucesso!</span>
-                </div>
-                <ol className="text-xs text-indigo-800/90 space-y-1 list-decimal list-inside leading-relaxed pl-1">
-                  <li>Aguarde o download do novo instalador terminar.</li>
-                  <li>Feche o aplicativo Controle de Caixa.</li>
-                  <li>Abra o instalador baixado para concluir a atualização.</li>
-                  <li><strong>Seus dados e históricos permanecerão 100% seguros e intactos.</strong></li>
-                </ol>
-              </motion.div>
-            )}
 
             {/* Offline or already updated info */}
             {!hasUpdate && (
@@ -317,11 +476,12 @@ export function AppUpdateModal({
                 <div className="flex items-center gap-2 w-full sm:w-auto">
                   <button
                     type="button"
+                    disabled={downloadStatus === "downloading" || downloadStatus === "installing"}
                     onClick={() => {
                       onSnooze();
                       onClose();
                     }}
-                    className="flex-1 sm:flex-none px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                    className="flex-1 sm:flex-none px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs disabled:opacity-50"
                     title="Lembrar novamente amanhã"
                   >
                     <Clock size={13} className="text-slate-400" />
@@ -330,25 +490,46 @@ export function AppUpdateModal({
 
                   <button
                     type="button"
+                    disabled={downloadStatus === "downloading" || downloadStatus === "installing"}
                     onClick={() => {
                       onDismissVersion(latestVersion);
                       onClose();
                     }}
-                    className="px-3 py-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200/50 rounded-xl text-xs font-medium transition cursor-pointer"
+                    className="px-3 py-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200/50 rounded-xl text-xs font-medium transition cursor-pointer disabled:opacity-50"
                     title="Não notificar mais automaticamente sobre esta versão específica"
                   >
-                    Pular esta versão
+                    Pular versão
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleStartUpdate}
-                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-extrabold text-xs transition cursor-pointer shadow-md hover:shadow-lg flex items-center justify-center gap-2 transform active:scale-95"
-                >
-                  <Download size={14} className="stroke-[2.5]" />
-                  <span>Baixar e Atualizar Agora</span>
-                </button>
+                {downloadStatus === "ready_to_install" ? (
+                  <button
+                    type="button"
+                    onClick={handleInstallAndRestart}
+                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 text-white font-black text-xs transition cursor-pointer shadow-lg hover:shadow-xl flex items-center justify-center gap-2 transform active:scale-95 animate-pulse"
+                  >
+                    <Play size={14} className="fill-white" />
+                    <span>Instalar e Reiniciar Agora</span>
+                  </button>
+                ) : downloadStatus === "downloading" ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-slate-300 text-slate-600 font-bold text-xs flex items-center justify-center gap-2 cursor-not-allowed"
+                  >
+                    <RefreshCw size={13} className="animate-spin text-slate-500" />
+                    <span>Baixando {downloadPercent}%...</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleStartInAppDownload}
+                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-extrabold text-xs transition cursor-pointer shadow-md hover:shadow-lg flex items-center justify-center gap-2 transform active:scale-95"
+                  >
+                    <Download size={14} className="stroke-[2.5]" />
+                    <span>Baixar Atualização no App</span>
+                  </button>
+                )}
               </>
             ) : (
               <>
@@ -359,7 +540,7 @@ export function AppUpdateModal({
                   title="Simular como fica a tela quando houver uma nova versão disponível"
                 >
                   <Sparkles size={13} />
-                  <span>Testar Notificação (Simular v1.0.7)</span>
+                  <span>Testar Atualização no App (Simular v1.0.8)</span>
                 </button>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
