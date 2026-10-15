@@ -398,7 +398,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
       const simulate = req.query.simulate === "true";
       
       // Read current local package version
-      let currentVersion = process.env.APP_VERSION || "1.0.8";
+      let currentVersion = process.env.APP_VERSION || "1.0.9";
       try {
         const candidatePaths = [
           path.join(process.cwd(), "package.json"),
@@ -422,12 +422,12 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
         res.json({
           hasUpdate: true,
           currentVersion,
-          latestVersion: "1.0.8",
-          releaseName: "Versão 1.0.8 - Base Limpa & Atualizador no App",
-          releaseNotes: "### 🚀 O que mudou na Versão 1.0.8:\n- **Base de Dados Limpa**: Remoção completa de registros de demonstração e limpeza automática.\n- **Atualizador no App**: Download integrado diretamente no aplicativo com barra de progresso em tempo real e reinicialização automática.\n- **Melhorias Gerais**: Correções no fluxo de caixa, aluguéis e maior estabilidade do sistema.",
+          latestVersion: "1.0.9",
+          releaseName: "Versão 1.0.9 - Atualização de Recursos & Notificações",
+          releaseNotes: "### 🚀 O que mudou na Versão 1.0.9:\n- **Melhorias de Estabilidade**: Otimização no verificador de atualizações e leitura precisa da versão.\n- **Interface Aprimorada**: Ajustes visuais nos relatórios e conciliação financeira.\n- **Correções Gerais**: Correções no fluxo de caixa e exportação.",
           publishedAt: new Date().toISOString(),
           downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
-          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.8.exe",
+          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.9.exe",
           installerSize: 115000000,
           isSimulated: true,
           checkedAt: new Date().toISOString()
@@ -542,7 +542,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
           percent: 0,
           transferred: 0,
           total: 115000000,
-          filePath: path.join(os.tmpdir(), `Controle-de-Caixa-Setup-${version || "1.0.8"}.exe`),
+          filePath: path.join(os.tmpdir(), `Controle-de-Caixa-Setup-${version || "1.0.9"}.exe`),
           error: null,
         };
         res.json({ message: "Download simulado iniciado." });

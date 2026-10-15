@@ -753,9 +753,9 @@ export default function App() {
       if (manual) {
         setUpdateInfo({
           hasUpdate: false,
-          currentVersion: "1.0.8",
-          latestVersion: "1.0.8",
-          releaseName: "Versão 1.0.8",
+          currentVersion: "1.0.9",
+          latestVersion: "1.0.9",
+          releaseName: "Versão 1.0.9",
           releaseNotes: "Não foi possível conectar ao servidor de atualizações do GitHub no momento. Verifique sua conexão com a internet.",
           publishedAt: new Date().toISOString(),
           downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
@@ -4586,7 +4586,7 @@ export default function App() {
             ) : (
               <>
                 <RefreshCw size={9} className={isCheckingUpdate ? "animate-spin text-indigo-300" : "text-slate-400"} />
-                <span>v{updateInfo?.currentVersion || "1.0.8"}</span>
+                <span>v{updateInfo?.currentVersion || "1.0.9"}</span>
               </>
             )}
           </button>

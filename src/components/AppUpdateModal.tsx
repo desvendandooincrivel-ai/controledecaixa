@@ -540,7 +540,7 @@ export function AppUpdateModal({
                   title="Simular como fica a tela quando houver uma nova versão disponível"
                 >
                   <Sparkles size={13} />
-                  <span>Testar Atualização no App (Simular v1.0.8)</span>
+                  <span>Testar Atualização no App (Simular Nova Versão)</span>
                 </button>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
