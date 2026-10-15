@@ -35,6 +35,14 @@ interface RentalProperty {
   depositStartDate?: string;
   depositInterestRate?: number;
   depositCorrectionMode?: "fixed" | "bcb";
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: any[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
 }
 
 interface DepositDetailModalProps {

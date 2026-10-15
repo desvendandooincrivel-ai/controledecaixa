@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   BarChart as RechartsBarChart,
   Bar as RechartsBar,
@@ -13,6 +13,14 @@ import {
   Cell as RechartsCell,
   LineChart as RechartsLineChart,
   Line as RechartsLine,
+  AreaChart as RechartsAreaChart,
+  Area as RechartsArea,
+  ComposedChart as RechartsComposedChart,
+  RadarChart as RechartsRadarChart,
+  Radar as RechartsRadar,
+  PolarGrid as RechartsPolarGrid,
+  PolarAngleAxis as RechartsPolarAngleAxis,
+  PolarRadiusAxis as RechartsPolarRadiusAxis,
 } from "recharts";
 import {
   TrendingUp,
@@ -31,9 +39,19 @@ import {
   Info,
   Clock,
   ChevronDown,
+  ChevronUp,
   AlertTriangle,
   Bell,
-  CheckCircle2
+  CheckCircle2,
+  X,
+  LineChart as LucideLineChart,
+  Check,
+  Search,
+  Printer,
+  FileText,
+  SlidersHorizontal,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -63,6 +81,14 @@ interface RentalProperty {
   adminFeeAmount: number;
   paidPeriods: string[];
   paymentDates?: Record<string, string>;
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: any[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
 }
 
 interface LeadpageDashboardProps {
@@ -115,6 +141,234 @@ const CATEGORIES_SAIDA = [
   "Outras Despesas"
 ];
 
+// Component for Multi-Select Category Filter with Checkboxes
+interface CategoryMultiSelectDropdownProps {
+  label: string;
+  allCategories: string[];
+  selectedCategories: string[];
+  onChange: (newSelected: string[]) => void;
+  accentColor?: "indigo" | "blue" | "emerald";
+  className?: string;
+}
+
+function CategoryMultiSelectDropdown({
+  label,
+  allCategories,
+  selectedCategories,
+  onChange,
+  className = ""
+}: CategoryMultiSelectDropdownProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    if (isOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isOpen]);
+
+  const filteredCategories = useMemo(() => {
+    if (!searchTerm.trim()) return allCategories;
+    const lower = searchTerm.toLowerCase();
+    return allCategories.filter(cat => cat.toLowerCase().includes(lower));
+  }, [allCategories, searchTerm]);
+
+  const toggleCategory = (cat: string) => {
+    if (selectedCategories.includes(cat)) {
+      onChange(selectedCategories.filter(c => c !== cat));
+    } else {
+      onChange([...selectedCategories, cat]);
+    }
+  };
+
+  const selectAll = () => {
+    onChange([...allCategories]);
+  };
+
+  const clearAll = () => {
+    onChange([]);
+  };
+
+  const isNoneFiltered = selectedCategories.length === 0;
+
+  return (
+    <div className={`relative inline-block text-left ${className}`} ref={dropdownRef}>
+      {/* Trigger Button */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(prev => !prev)}
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold transition shadow-xs cursor-pointer select-none ${
+          selectedCategories.length > 0
+            ? "bg-indigo-50 border-indigo-300 text-indigo-900 ring-1 ring-indigo-200"
+            : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+        }`}
+      >
+        <Filter size={13} className={selectedCategories.length > 0 ? "text-indigo-600" : "text-slate-400"} />
+        <span className="text-[10px] uppercase font-bold text-slate-400">{label}:</span>
+        
+        {isNoneFiltered ? (
+          <span className="font-extrabold text-slate-700">Todas as Categorias</span>
+        ) : selectedCategories.length === 1 ? (
+          <span className="font-extrabold text-indigo-700 truncate max-w-[130px]">{selectedCategories[0]}</span>
+        ) : (
+          <span className="flex items-center gap-1 font-extrabold text-indigo-700">
+            <span>{selectedCategories.length} categorias</span>
+            <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white text-[9px] font-mono leading-tight">
+              {selectedCategories.length}
+            </span>
+          </span>
+        )}
+
+        <ChevronDown size={13} className={`text-slate-400 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+
+        {selectedCategories.length > 0 && (
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              clearAll();
+            }}
+            title="Limpar seleção (mostrar todas)"
+            className="p-0.5 rounded-full hover:bg-rose-100 hover:text-rose-600 text-slate-400 transition cursor-pointer ml-0.5"
+          >
+            <X size={12} />
+          </span>
+        )}
+      </button>
+
+      {/* Popover / Dropdown Menu */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -4, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }}
+            transition={{ duration: 0.12 }}
+            className="absolute left-0 mt-2 z-50 w-72 sm:w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 p-3 text-slate-800 flex flex-col gap-2.5"
+          >
+            {/* Header with Title and counts */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+              <div className="flex items-center gap-1.5">
+                <span className="p-1 bg-indigo-50 text-indigo-600 rounded-md">
+                  <Filter size={13} />
+                </span>
+                <span className="text-xs font-black text-slate-800">Filtrar por Categorias</span>
+              </div>
+              <span className="text-[10px] font-bold text-slate-400 font-mono">
+                {selectedCategories.length === 0 ? "Todas ativas" : `${selectedCategories.length} de ${allCategories.length}`}
+              </span>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Buscar categoria..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden focus:border-indigo-400 font-medium"
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+
+            {/* Quick action buttons */}
+            <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={selectAll}
+                className="flex-1 py-1 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer text-center text-[10.5px]"
+              >
+                ☑ Marcar Todas
+              </button>
+              <button
+                type="button"
+                onClick={clearAll}
+                className="flex-1 py-1 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer text-center text-[10.5px]"
+              >
+                ☐ Desmarcar (Ver Tudo)
+              </button>
+            </div>
+
+            {/* Checkbox Category List */}
+            <div className="max-h-56 overflow-y-auto space-y-1 pr-1 scrollbar-thin">
+              {filteredCategories.length > 0 ? (
+                filteredCategories.map(cat => {
+                  const isChecked = selectedCategories.includes(cat);
+                  const isEntrada = CATEGORIES_ENTRADA.includes(cat);
+                  const hex = CATEGORY_HEX_COLORS[cat] || (isEntrada ? "#10b981" : "#f43f5e");
+
+                  return (
+                    <label
+                      key={cat}
+                      className={`flex items-center justify-between p-2 rounded-xl border transition cursor-pointer select-none text-xs ${
+                        isChecked
+                          ? "bg-indigo-50/60 border-indigo-200 text-indigo-950 font-bold"
+                          : "bg-white border-slate-100 hover:bg-slate-50 text-slate-700"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleCategory(cat)}
+                          className="w-4 h-4 rounded-md text-indigo-600 accent-indigo-600 focus:ring-0 cursor-pointer"
+                        />
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: hex }} />
+                        <span className="truncate text-[11.5px]">{cat}</span>
+                      </div>
+                      <span className={`text-[8.5px] font-extrabold uppercase px-1.5 py-0.5 rounded-md shrink-0 ml-1.5 ${
+                        isEntrada ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                      }`}>
+                        {isEntrada ? "Receita" : "Despesa"}
+                      </span>
+                    </label>
+                  );
+                })
+              ) : (
+                <div className="py-6 text-center text-xs text-slate-400 italic">
+                  Nenhuma categoria encontrada
+                </div>
+              )}
+            </div>
+
+            {/* Footer with Close / Apply */}
+            <div className="border-t border-slate-100 pt-2 flex items-center justify-between">
+              <span className="text-[10px] text-slate-400 italic">
+                {selectedCategories.length === 0 ? "Exibindo todas as movimentações" : `Filtrando por ${selectedCategories.length} categorias`}
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition shadow-xs cursor-pointer"
+              >
+                Concluir
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export function LeadpageDashboard({
   transactions,
   activeCaixaId,
@@ -128,9 +382,48 @@ export function LeadpageDashboard({
   const [caixaFilter, setCaixaFilter] = useState<"active" | "all">("active");
   const [periodScope, setPeriodScope] = useState<"filtered" | "all">("all");
   const [showPrevMonthComparison, setShowPrevMonthComparison] = useState<boolean>(true);
-  const [activeCategoryTab, setActiveCategoryTab] = useState<"saida" | "entrada">("saida");
+  const [activeCategoryTab, setActiveCategoryTab] = useState<"saida" | "entrada" | "misto">("saida");
 
+  // Category multi-select filter states (empty array means ALL categories)
+  const [dashboardCategoryFilters, setDashboardCategoryFilters] = useState<string[]>([]);
+  const [flowCategoryFilters, setFlowCategoryFilters] = useState<string[]>([]);
 
+  // Dedicated filter states for the "Comparativo Mensal Histórico" chart
+  const [monthlyHistoricalCategoryFilters, setMonthlyHistoricalCategoryFilters] = useState<string[]>([]);
+  const [monthlyHistoricalYearFilter, setMonthlyHistoricalYearFilter] = useState<string>("todos");
+  const [monthlyHistoricalFlowType, setMonthlyHistoricalFlowType] = useState<"todos" | "entrada" | "saida">("todos");
+
+  // Chart type modes
+  const [monthlyChartType, setMonthlyChartType] = useState<"bar" | "line" | "area" | "composed" | "stacked" | "radar">("bar");
+  const [categoryChartMode, setCategoryChartMode] = useState<"bar" | "pie" | "radar">("bar");
+  const [annualViewMode, setAnnualViewMode] = useState<"cards" | "chart">("cards");
+  const [weeklyViewMode, setWeeklyViewMode] = useState<"cards" | "chart">("cards");
+  const [dailyViewMode, setDailyViewMode] = useState<"cards" | "chart">("cards");
+
+  // Dedicated Print Report Modal State
+  const [isPrintReportModalOpen, setIsPrintReportModalOpen] = useState<boolean>(false);
+
+  // Consolidated list of all available categories
+  const availableCategoriesList = useMemo(() => {
+    const catSet = new Set<string>();
+    CATEGORIES_ENTRADA.forEach(c => catSet.add(c));
+    CATEGORIES_SAIDA.forEach(c => catSet.add(c));
+    transactions.forEach(t => {
+      if (t.category && t.category.trim()) {
+        catSet.add(t.category.trim());
+      }
+    });
+    return Array.from(catSet).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [transactions]);
+
+  // Filtered transactions for the upper dashboard & charts
+  const filteredDashboardTransactions = useMemo(() => {
+    return transactions.filter(t => {
+      if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
+      if (dashboardCategoryFilters.length > 0 && !dashboardCategoryFilters.includes(t.category)) return false;
+      return true;
+    });
+  }, [transactions, activeCaixaId, caixaFilter, dashboardCategoryFilters]);
 
   // --- TEMPORAL CASH FLOW STATES AND CALCULATIONS ---
   const [timeframe, setTimeframe] = useState<"anual" | "mensal" | "semanal" | "diario">("anual");
@@ -169,9 +462,10 @@ export function LeadpageDashboard({
   const timelineTransactions = useMemo(() => {
     return transactions.filter(t => {
       if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
+      if (flowCategoryFilters.length > 0 && !flowCategoryFilters.includes(t.category)) return false;
       return true;
     });
-  }, [transactions, activeCaixaId, caixaFilter]);
+  }, [transactions, activeCaixaId, caixaFilter, flowCategoryFilters]);
 
   // Hovered month detailed categories & mini chart data
   const hoveredMonthDataEx = useMemo(() => {
@@ -518,16 +812,54 @@ export function LeadpageDashboard({
     return null;
   };
 
-  // Process data chronologically by month
-  const monthlyData = useMemo(() => {
-    const filteredT = transactions.filter(t => {
+  // Filtered transactions specific to the "Comparativo Mensal Histórico" chart
+  const filteredMonthlyHistoricalTransactions = useMemo(() => {
+    return transactions.filter(t => {
       if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
+      
+      // Category filter: use specific monthly filter if active, otherwise fallback to dashboard filter
+      const activeCats = monthlyHistoricalCategoryFilters.length > 0 
+        ? monthlyHistoricalCategoryFilters 
+        : dashboardCategoryFilters;
+      if (activeCats.length > 0 && !activeCats.includes(t.category)) return false;
+
+      // Flow type filter (Entrada vs Saida vs Todos)
+      if (monthlyHistoricalFlowType === "entrada" && t.type !== "entrada") return false;
+      if (monthlyHistoricalFlowType === "saida" && t.type !== "saida") return false;
+
+      // Year / Period Range filter
+      if (t.date && monthlyHistoricalYearFilter !== "todos") {
+        if (monthlyHistoricalYearFilter === "last12") {
+          const now = new Date();
+          const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+          const parts = t.date.split("-");
+          if (parts.length >= 2) {
+            const tDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2] || "1"));
+            if (tDate < twelveMonthsAgo) return false;
+          }
+        } else if (monthlyHistoricalYearFilter === "last6") {
+          const now = new Date();
+          const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+          const parts = t.date.split("-");
+          if (parts.length >= 2) {
+            const tDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2] || "1"));
+            if (tDate < sixMonthsAgo) return false;
+          }
+        } else {
+          const tYr = t.date.substring(0, 4);
+          if (tYr !== monthlyHistoricalYearFilter) return false;
+        }
+      }
+
       return true;
     });
+  }, [transactions, activeCaixaId, caixaFilter, monthlyHistoricalCategoryFilters, dashboardCategoryFilters, monthlyHistoricalFlowType, monthlyHistoricalYearFilter]);
 
+  // Process data chronologically by month for the Comparativo Mensal Histórico
+  const monthlyData = useMemo(() => {
     const monthsMap: { [key: string]: { entrada: number; saida: number } } = {};
 
-    filteredT.forEach(t => {
+    filteredMonthlyHistoricalTransactions.forEach(t => {
       if (!t.date) return;
       const period = t.date.substring(0, 7); // "YYYY-MM"
       if (!monthsMap[period]) {
@@ -558,7 +890,7 @@ export function LeadpageDashboard({
         "Saldo Líquido": dataObj.entrada - dataObj.saida
       };
     });
-  }, [transactions, activeCaixaId, caixaFilter, monthsList]);
+  }, [filteredMonthlyHistoricalTransactions, monthsList]);
 
   // Process categories data (including all categories with comparison)
   const categoryChartData = useMemo(() => {
@@ -569,12 +901,8 @@ export function LeadpageDashboard({
       refYear = parseInt(filterYear);
       refMonth = parseInt(filterMonth);
     } else {
-      const filteredT = transactions.filter(t => {
-        if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
-        return true;
-      });
-      if (filteredT.length > 0) {
-        const sorted = [...filteredT].sort((a, b) => b.date.localeCompare(a.date));
+      if (filteredDashboardTransactions.length > 0) {
+        const sorted = [...filteredDashboardTransactions].sort((a, b) => b.date.localeCompare(a.date));
         const latestDate = sorted[0].date;
         if (latestDate && latestDate.length >= 7) {
           const parts = latestDate.split("-");
@@ -593,10 +921,7 @@ export function LeadpageDashboard({
 
     const prevPeriodStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 
-    const currentScopeTxs = transactions.filter(t => {
-      // Caixa filter
-      if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
-      
+    const currentScopeTxs = filteredDashboardTransactions.filter(t => {
       // Period filter
       if (periodScope === "filtered") {
         if (filterMonth !== "todos") {
@@ -611,18 +936,30 @@ export function LeadpageDashboard({
       return true;
     });
 
-    const prevScopeTxs = periodScope === "filtered" ? transactions.filter(t => {
-      if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
+    const prevScopeTxs = periodScope === "filtered" ? filteredDashboardTransactions.filter(t => {
       if (!t.date || t.date.length < 7) return false;
       return t.date.substring(0, 7) === prevPeriodStr;
     }) : [];
 
-    // Accumulators
-    const entradaMap = new Map<string, number>(CATEGORIES_ENTRADA.map(cat => [cat, 0]));
-    const saidaMap = new Map<string, number>(CATEGORIES_SAIDA.map(cat => [cat, 0]));
+    // Gather dynamic category names from transactions and defaults
+    const allEntradaNames = Array.from(new Set([
+      ...(dashboardCategoryFilters.length === 0 ? CATEGORIES_ENTRADA : CATEGORIES_ENTRADA.filter(c => dashboardCategoryFilters.includes(c))),
+      ...currentScopeTxs.filter(t => t.type === "entrada").map(t => t.category),
+      ...prevScopeTxs.filter(t => t.type === "entrada").map(t => t.category)
+    ])).filter(Boolean);
 
-    const prevEntradaMap = new Map<string, number>(CATEGORIES_ENTRADA.map(cat => [cat, 0]));
-    const prevSaidaMap = new Map<string, number>(CATEGORIES_SAIDA.map(cat => [cat, 0]));
+    const allSaidaNames = Array.from(new Set([
+      ...(dashboardCategoryFilters.length === 0 ? CATEGORIES_SAIDA : CATEGORIES_SAIDA.filter(c => dashboardCategoryFilters.includes(c))),
+      ...currentScopeTxs.filter(t => t.type === "saida").map(t => t.category),
+      ...prevScopeTxs.filter(t => t.type === "saida").map(t => t.category)
+    ])).filter(Boolean);
+
+    // Accumulators
+    const entradaMap = new Map<string, number>(allEntradaNames.map(cat => [cat, 0]));
+    const saidaMap = new Map<string, number>(allSaidaNames.map(cat => [cat, 0]));
+
+    const prevEntradaMap = new Map<string, number>(allEntradaNames.map(cat => [cat, 0]));
+    const prevSaidaMap = new Map<string, number>(allSaidaNames.map(cat => [cat, 0]));
 
     currentScopeTxs.forEach(t => {
       if (t.type === "entrada") {
@@ -641,7 +978,7 @@ export function LeadpageDashboard({
     });
 
     // Generate complete arrays
-    let entradas = CATEGORIES_ENTRADA.map(cat => {
+    let entradas = allEntradaNames.map(cat => {
       const total = entradaMap.get(cat) || 0;
       const prevTotal = prevEntradaMap.get(cat) || 0;
       const pctChange = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : total > 0 ? 100 : 0;
@@ -650,11 +987,11 @@ export function LeadpageDashboard({
         "Total": total,
         "PrevTotal": prevTotal,
         "pctChange": pctChange,
-        fill: CATEGORY_HEX_COLORS[cat] || "#94a3b8"
+        fill: CATEGORY_HEX_COLORS[cat] || "#10b981"
       };
     });
 
-    let saidas = CATEGORIES_SAIDA.map(cat => {
+    let saidas = allSaidaNames.map(cat => {
       const total = saidaMap.get(cat) || 0;
       const prevTotal = prevSaidaMap.get(cat) || 0;
       const pctChange = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : total > 0 ? 100 : 0;
@@ -675,19 +1012,20 @@ export function LeadpageDashboard({
     entradas.sort((a, b) => b["Total"] - a["Total"]);
     saidas.sort((a, b) => b["Total"] - a["Total"]);
 
-    return { entradas, saidas };
-  }, [transactions, activeCaixaId, caixaFilter, periodScope, filterMonth, filterYear]);
+    let misto = [
+      ...entradas.map(e => ({ ...e, name: `[Entrada] ${e.name}`, categoryType: "entrada" as const, fill: "#10b981" })),
+      ...saidas.map(s => ({ ...s, name: `[Saída] ${s.name}`, categoryType: "saida" as const, fill: "#f43f5e" }))
+    ];
+    misto.sort((a, b) => b["Total"] - a["Total"]);
+
+    return { entradas, saidas, misto };
+  }, [filteredDashboardTransactions, periodScope, filterMonth, filterYear, dashboardCategoryFilters]);
 
   // Overall statistics for the selected scope
   const leadStats = useMemo(() => {
-    const filteredT = transactions.filter(t => {
-      if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
-      return true;
-    });
-
     let totalEntradas = 0;
     let totalSaidas = 0;
-    filteredT.forEach(t => {
+    filteredDashboardTransactions.forEach(t => {
       if (t.type === "entrada") totalEntradas += t.amount;
       else totalSaidas += t.amount;
     });
@@ -700,9 +1038,9 @@ export function LeadpageDashboard({
       totalSaidas,
       netBalance,
       efficiency,
-      count: filteredT.length
+      count: filteredDashboardTransactions.length
     };
-  }, [transactions, activeCaixaId, caixaFilter]);
+  }, [filteredDashboardTransactions]);
 
   // Calculation of active month vs previous month stats for comparison
   const comparisonStats = useMemo(() => {
@@ -713,12 +1051,8 @@ export function LeadpageDashboard({
       refYear = parseInt(filterYear);
       refMonth = parseInt(filterMonth);
     } else {
-      const filteredT = transactions.filter(t => {
-        if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
-        return true;
-      });
-      if (filteredT.length > 0) {
-        const sorted = [...filteredT].sort((a, b) => b.date.localeCompare(a.date));
+      if (filteredDashboardTransactions.length > 0) {
+        const sorted = [...filteredDashboardTransactions].sort((a, b) => b.date.localeCompare(a.date));
         const latestDate = sorted[0].date;
         if (latestDate && latestDate.length >= 7) {
           const parts = latestDate.split("-");
@@ -738,17 +1072,12 @@ export function LeadpageDashboard({
     const refPeriodStr = `${refYear}-${String(refMonth).padStart(2, "0")}`;
     const prevPeriodStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 
-    const txsInScope = transactions.filter(t => {
-      if (caixaFilter === "active" && t.caixaId !== activeCaixaId) return false;
-      return true;
-    });
-
     let refEntradas = 0;
     let refSaidas = 0;
     let prevEntradas = 0;
     let prevSaidas = 0;
 
-    txsInScope.forEach(t => {
+    filteredDashboardTransactions.forEach(t => {
       if (!t.date || t.date.length < 7) return;
       const tPeriod = t.date.substring(0, 7);
       if (tPeriod === refPeriodStr) {
@@ -799,7 +1128,7 @@ export function LeadpageDashboard({
       prevEfficiency: refEntradas > 0 ? (prevBalance / refEntradas) * 100 : 0, // normalized or true diff
       percentageChanges
     };
-  }, [transactions, activeCaixaId, caixaFilter, filterYear, filterMonth, monthsList]);
+  }, [filteredDashboardTransactions, filterYear, filterMonth, monthsList]);
 
   const activeMonthLabel = useMemo(() => {
     const monthObj = monthsList.find(m => m.value === filterMonth);
@@ -828,29 +1157,87 @@ export function LeadpageDashboard({
         </div>
 
         {/* Dashboard Configuration Controls */}
-        <div className="flex flex-wrap items-center gap-2.5 bg-slate-100 p-1 rounded-xl text-xs font-semibold self-start border border-slate-200/50">
+        <div className="flex flex-wrap items-center gap-2.5 self-start">
+          {/* Caixa Switcher */}
+          <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-semibold border border-slate-200/50">
+            <button
+              onClick={() => setCaixaFilter("active")}
+              className={`px-3 py-1.5 rounded-lg transition duration-150 cursor-pointer ${
+                caixaFilter === "active"
+                  ? "bg-white text-slate-800 shadow-xs border border-slate-200"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Caixa: {activeCaixaName}
+            </button>
+            <button
+              onClick={() => setCaixaFilter("all")}
+              className={`px-3 py-1.5 rounded-lg transition duration-150 cursor-pointer ${
+                caixaFilter === "all"
+                  ? "bg-white text-slate-800 shadow-xs border border-slate-200"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Todos os Caixas
+            </button>
+          </div>
+
+          {/* Category Multi-Select Filter */}
+          <CategoryMultiSelectDropdown
+            label="Categorias"
+            allCategories={availableCategoriesList}
+            selectedCategories={dashboardCategoryFilters}
+            onChange={setDashboardCategoryFilters}
+          />
+
+          {/* Print Charts Report Button */}
           <button
-            onClick={() => setCaixaFilter("active")}
-            className={`px-3 py-1.5 rounded-lg transition duration-150 cursor-pointer ${
-              caixaFilter === "active"
-                ? "bg-white text-slate-800 shadow-xs border border-slate-200"
-                : "text-slate-500 hover:text-slate-800"
-            }`}
+            type="button"
+            onClick={() => setIsPrintReportModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs cursor-pointer select-none"
+            title="Abrir e imprimir relatório exclusivo de gráficos com as categorias filtradas"
           >
-            Caixa: {activeCaixaName}
-          </button>
-          <button
-            onClick={() => setCaixaFilter("all")}
-            className={`px-3 py-1.5 rounded-lg transition duration-150 cursor-pointer ${
-              caixaFilter === "all"
-                ? "bg-white text-slate-800 shadow-xs border border-slate-200"
-                : "text-slate-500 hover:text-slate-800"
-            }`}
-          >
-            Todos os Caixas
+            <Printer size={13} />
+            <span>Relatório de Gráficos</span>
           </button>
         </div>
       </div>
+
+      {/* Active Dashboard Category Chips (when filtered) */}
+      {dashboardCategoryFilters.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-6 p-2 bg-indigo-50/50 border border-indigo-150 rounded-xl">
+          <span className="text-[10px] font-extrabold text-indigo-700 uppercase tracking-wider flex items-center gap-1 mr-1">
+            <Filter size={11} /> Filtrando {dashboardCategoryFilters.length} categorias:
+          </span>
+          {dashboardCategoryFilters.map(cat => {
+            const isEntrada = CATEGORIES_ENTRADA.includes(cat);
+            return (
+              <span
+                key={cat}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10.5px] font-bold bg-white border border-indigo-200 text-indigo-900 shadow-3xs"
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${isEntrada ? "bg-emerald-500" : "bg-rose-500"}`} />
+                {cat}
+                <button
+                  type="button"
+                  onClick={() => setDashboardCategoryFilters(prev => prev.filter(c => c !== cat))}
+                  className="hover:text-rose-600 cursor-pointer ml-0.5 p-0.5 text-slate-400"
+                  title={`Remover filtro ${cat}`}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => setDashboardCategoryFilters([])}
+            className="text-[10px] font-bold text-indigo-600 hover:text-rose-600 underline cursor-pointer ml-auto px-1.5"
+          >
+            Limpar todas
+          </button>
+        </div>
+      )}
 
 
 
@@ -1004,64 +1391,516 @@ export function LeadpageDashboard({
         {/* LEFT CARD: COMPARATIVO MENSAL (ENTRADAS VS SAIDAS) */}
         <div className="lg:col-span-12 xl:col-span-7 bg-white border border-slate-200 rounded-3xl p-5 flex flex-col justify-between shadow-xs">
           <div>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 border-b border-slate-100 pb-4">
-              <div className="flex items-center gap-2">
-                <span className="p-1.5 bg-slate-50 text-slate-500 rounded-lg">
-                  <Calendar size={15} />
-                </span>
-                <div>
-                  <h3 className="font-bold text-sm text-slate-800">Comparativo Mensal Histórico</h3>
-                  <p className="text-[11px] text-slate-400 leading-normal">Receitas vs Despesas organizadas por mês de competência</p>
+            <div className="flex flex-col gap-4 mb-5 border-b border-slate-100 pb-4">
+              {/* Card Title & Chart Type Switcher Row */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 bg-slate-50 text-slate-500 rounded-lg">
+                    <Calendar size={15} />
+                  </span>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800">Comparativo Mensal Histórico</h3>
+                    <p className="text-[11px] text-slate-400 leading-normal">
+                      Receitas vs Despesas organizadas por mês de competência
+                    </p>
+                  </div>
+                </div>
+
+                {/* Chart Type Selector */}
+                <div className="flex flex-wrap bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold border border-slate-150 self-start lg:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("bar")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "bar" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico de Barras Lado a Lado"
+                  >
+                    📊 Barras
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("line")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "line" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico de Linhas"
+                  >
+                    📈 Linhas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("area")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "area" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico de Área Sombreada"
+                  >
+                    🌊 Área
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("stacked")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "stacked" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico de Barras Empilhadas"
+                  >
+                    📚 Empilhado
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("composed")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "composed" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico Misto (Barras + Linha de Saldo)"
+                  >
+                    ✨ Misto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMonthlyChartType("radar")}
+                    className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                      monthlyChartType === "radar" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                    title="Gráfico Radar de Competências"
+                  >
+                    🕸️ Radar
+                  </button>
                 </div>
               </div>
 
-              <div className="text-[10px] text-slate-400 flex items-center gap-2 border bg-slate-50/50 px-2.5 py-1.5 rounded-lg border-slate-150 select-none">
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-2.5 h-2.5 bg-emerald-500 rounded-sm"></span>
-                  Receitas
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-2.5 h-2.5 bg-rose-500 rounded-sm"></span>
-                  Despesas
-                </span>
+              {/* Dedicated Filter Controls Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-slate-100/80">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Category Multi-Select Filter */}
+                  <CategoryMultiSelectDropdown
+                    label="Categorias"
+                    allCategories={availableCategoriesList}
+                    selectedCategories={monthlyHistoricalCategoryFilters}
+                    onChange={setMonthlyHistoricalCategoryFilters}
+                  />
+
+                  {/* Period / Year Select Filter */}
+                  <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-xs text-slate-600 font-semibold shadow-3xs">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Período:</span>
+                    <select
+                      value={monthlyHistoricalYearFilter}
+                      onChange={(e) => setMonthlyHistoricalYearFilter(e.target.value)}
+                      className="bg-transparent border-none p-0 focus:outline-hidden font-bold text-slate-700 text-xs cursor-pointer"
+                    >
+                      <option value="todos">Todos os Anos</option>
+                      <option value="last12">Últimos 12 Meses</option>
+                      <option value="last6">Últimos 6 Meses</option>
+                      {availableYears.map(yr => (
+                        <option key={yr} value={String(yr)}>Ano {yr}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Flow Type Filter: Ambos | Receitas | Despesas */}
+                  <div className="flex bg-slate-100 p-0.5 rounded-xl text-[10.5px] font-bold border border-slate-150">
+                    <button
+                      type="button"
+                      onClick={() => setMonthlyHistoricalFlowType("todos")}
+                      className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                        monthlyHistoricalFlowType === "todos"
+                          ? "bg-white text-slate-800 shadow-xs"
+                          : "text-slate-500 hover:text-slate-700"
+                      }`}
+                      title="Exibir todas as movimentações de receitas e despesas"
+                    >
+                      Ambos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMonthlyHistoricalFlowType("entrada")}
+                      className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                        monthlyHistoricalFlowType === "entrada"
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : "text-slate-500 hover:text-emerald-700"
+                      }`}
+                      title="Filtrar e mostrar somente Receitas"
+                    >
+                      Receitas
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMonthlyHistoricalFlowType("saida")}
+                      className={`px-2 py-1 rounded-lg transition cursor-pointer ${
+                        monthlyHistoricalFlowType === "saida"
+                          ? "bg-rose-600 text-white shadow-xs"
+                          : "text-slate-500 hover:text-rose-700"
+                      }`}
+                      title="Filtrar e mostrar somente Despesas"
+                    >
+                      Despesas
+                    </button>
+                  </div>
+                </div>
+
+                {/* Dynamic Legends with Zero Suppression */}
+                {(() => {
+                  const hasReceitas = monthlyData.some(d => (d["Receitas (Inflow)"] || 0) > 0);
+                  const hasDespesas = monthlyData.some(d => (d["Despesas (Outflow)"] || 0) > 0);
+
+                  return (
+                    <div className="text-[10px] text-slate-500 flex items-center gap-2 border bg-slate-50/70 px-2.5 py-1.5 rounded-lg border-slate-150 select-none">
+                      {hasReceitas && (
+                        <span className="flex items-center gap-1 font-bold text-emerald-700">
+                          <span className="inline-block w-2.5 h-2.5 bg-emerald-500 rounded-sm"></span>
+                          Receitas
+                        </span>
+                      )}
+                      {hasDespesas && (
+                        <span className="flex items-center gap-1 font-bold text-rose-700">
+                          <span className="inline-block w-2.5 h-2.5 bg-rose-500 rounded-sm"></span>
+                          Despesas
+                        </span>
+                      )}
+                      {monthlyChartType === "composed" && (
+                        <span className="flex items-center gap-1 font-bold text-indigo-700">
+                          <span className="inline-block w-2.5 h-2.5 bg-indigo-500 rounded-sm"></span>
+                          Saldo
+                        </span>
+                      )}
+                      {!hasReceitas && hasDespesas && (
+                        <span className="text-[9.5px] italic text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded font-bold">
+                          (Apenas Despesas)
+                        </span>
+                      )}
+                      {hasReceitas && !hasDespesas && (
+                        <span className="text-[9.5px] italic text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">
+                          (Apenas Receitas)
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
+
+              {/* Active Filter Badges for Comparativo Mensal Histórico */}
+              {(monthlyHistoricalCategoryFilters.length > 0 || monthlyHistoricalYearFilter !== "todos" || monthlyHistoricalFlowType !== "todos") && (
+                <div className="flex flex-wrap items-center gap-1.5 p-2 bg-indigo-50/50 border border-indigo-150 rounded-xl">
+                  <span className="text-[10px] font-extrabold text-indigo-700 uppercase tracking-wider flex items-center gap-1 mr-1">
+                    <Filter size={11} /> Filtros Ativos no Gráfico:
+                  </span>
+
+                  {monthlyHistoricalYearFilter !== "todos" && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10.5px] font-bold bg-white border border-indigo-200 text-indigo-900 shadow-3xs">
+                      <span>Período: {monthlyHistoricalYearFilter === "last12" ? "Últimos 12M" : monthlyHistoricalYearFilter === "last6" ? "Últimos 6M" : `Ano ${monthlyHistoricalYearFilter}`}</span>
+                      <button
+                        type="button"
+                        onClick={() => setMonthlyHistoricalYearFilter("todos")}
+                        className="hover:text-rose-600 cursor-pointer ml-0.5 text-slate-400"
+                        title="Limpar filtro de período"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  )}
+
+                  {monthlyHistoricalFlowType !== "todos" && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10.5px] font-bold bg-white border border-indigo-200 text-indigo-900 shadow-3xs">
+                      <span>Tipo: {monthlyHistoricalFlowType === "entrada" ? "Apenas Receitas" : "Apenas Despesas"}</span>
+                      <button
+                        type="button"
+                        onClick={() => setMonthlyHistoricalFlowType("todos")}
+                        className="hover:text-rose-600 cursor-pointer ml-0.5 text-slate-400"
+                        title="Limpar filtro de tipo"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  )}
+
+                  {monthlyHistoricalCategoryFilters.map(cat => {
+                    const isEntrada = CATEGORIES_ENTRADA.includes(cat);
+                    return (
+                      <span
+                        key={cat}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10.5px] font-bold bg-white border border-indigo-200 text-indigo-900 shadow-3xs"
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${isEntrada ? "bg-emerald-500" : "bg-rose-500"}`} />
+                        {cat}
+                        <button
+                          type="button"
+                          onClick={() => setMonthlyHistoricalCategoryFilters(prev => prev.filter(c => c !== cat))}
+                          className="hover:text-rose-600 cursor-pointer ml-0.5 text-slate-400"
+                          title={`Remover filtro ${cat}`}
+                        >
+                          <X size={10} />
+                        </button>
+                      </span>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMonthlyHistoricalCategoryFilters([]);
+                      setMonthlyHistoricalYearFilter("todos");
+                      setMonthlyHistoricalFlowType("todos");
+                    }}
+                    className="text-[10px] font-bold text-indigo-600 hover:text-rose-600 underline cursor-pointer ml-auto px-1.5"
+                  >
+                    Limpar todos
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* CHART VIEW */}
             <div className="h-72 w-full text-xs font-mono select-none">
-              {monthlyData.length > 0 ? (
-                <RechartsResponsiveContainer width="100%" height="100%">
-                  <RechartsBarChart
-                    data={monthlyData}
-                    margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
-                  >
-                    <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                    <RechartsXAxis
-                      dataKey="label"
-                      stroke="#94a3b8"
-                      fontSize={10}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <RechartsYAxis
-                      stroke="#94a3b8"
-                      fontSize={9}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
-                    />
-                    <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
-                    <RechartsBar name="Receitas" dataKey="Receitas (Inflow)" fill="#10b981" radius={[4, 4, 0, 0]} barSize={24} />
-                    <RechartsBar name="Despesas" dataKey="Despesas (Outflow)" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={24} />
-                  </RechartsBarChart>
-                </RechartsResponsiveContainer>
-              ) : (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-2 select-none">
-                  <HelpCircle size={24} className="stroke-1 text-slate-300" />
-                  <span className="text-xs font-semibold text-slate-650">Aguardando dados de transações</span>
-                  <p className="text-[10px] max-w-xs leading-relaxed text-slate-400">Insira algumas movimentações de receitas ou despesas com as respectivas datas para construir o gráfico comparativo.</p>
-                </div>
-              )}
+              {(() => {
+                if (monthlyData.length === 0) {
+                  return (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-2 select-none">
+                      <HelpCircle size={24} className="stroke-1 text-slate-300" />
+                      <span className="text-xs font-semibold text-slate-650">Aguardando dados de transações</span>
+                      <p className="text-[10px] max-w-xs leading-relaxed text-slate-400">Insira algumas movimentações de receitas ou despesas com as respectivas datas para construir o gráfico comparativo.</p>
+                    </div>
+                  );
+                }
+
+                const hasReceitas = monthlyData.some(d => (d["Receitas (Inflow)"] || 0) > 0);
+                const hasDespesas = monthlyData.some(d => (d["Despesas (Outflow)"] || 0) > 0);
+
+                if (!hasReceitas && !hasDespesas) {
+                  return (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-1.5 select-none">
+                      <HelpCircle size={22} className="stroke-1 text-slate-300" />
+                      <span className="text-xs font-bold text-slate-700">Sem valores para os filtros aplicados</span>
+                      <p className="text-[10px] text-slate-400 max-w-xs">Nenhum dado financeiro maior que zero foi encontrado para as categorias selecionadas.</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <RechartsResponsiveContainer width="100%" height="100%">
+                    {monthlyChartType === "bar" ? (
+                      <RechartsBarChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis
+                          dataKey="label"
+                          stroke="#94a3b8"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <RechartsYAxis
+                          stroke="#94a3b8"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
+                        />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        {hasReceitas && (
+                          <RechartsBar name="Receitas" dataKey="Receitas (Inflow)" fill="#10b981" radius={[4, 4, 0, 0]} barSize={24} />
+                        )}
+                        {hasDespesas && (
+                          <RechartsBar name="Despesas" dataKey="Despesas (Outflow)" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={24} />
+                        )}
+                      </RechartsBarChart>
+                    ) : monthlyChartType === "stacked" ? (
+                      <RechartsBarChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis
+                          dataKey="label"
+                          stroke="#94a3b8"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <RechartsYAxis
+                          stroke="#94a3b8"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
+                        />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        {hasReceitas && (
+                          <RechartsBar name="Receitas" dataKey="Receitas (Inflow)" stackId="stackGroup" fill="#10b981" radius={[0, 0, 0, 0]} barSize={26} />
+                        )}
+                        {hasDespesas && (
+                          <RechartsBar name="Despesas" dataKey="Despesas (Outflow)" stackId="stackGroup" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={26} />
+                        )}
+                      </RechartsBarChart>
+                    ) : monthlyChartType === "line" ? (
+                      <RechartsLineChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis
+                          dataKey="label"
+                          stroke="#94a3b8"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <RechartsYAxis
+                          stroke="#94a3b8"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
+                        />
+                        <RechartsTooltip content={<CustomTooltip />} />
+                        {hasReceitas && (
+                          <RechartsLine
+                            type="monotone"
+                            name="Receitas"
+                            dataKey="Receitas (Inflow)"
+                            stroke="#10b981"
+                            strokeWidth={2.5}
+                            dot={{ r: 3.5, fill: "#10b981" }}
+                            activeDot={{ r: 5.5 }}
+                          />
+                        )}
+                        {hasDespesas && (
+                          <RechartsLine
+                            type="monotone"
+                            name="Despesas"
+                            dataKey="Despesas (Outflow)"
+                            stroke="#f43f5e"
+                            strokeWidth={2.5}
+                            dot={{ r: 3.5, fill: "#f43f5e" }}
+                            activeDot={{ r: 5.5 }}
+                          />
+                        )}
+                      </RechartsLineChart>
+                    ) : monthlyChartType === "area" ? (
+                      <RechartsAreaChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
+                      >
+                        <defs>
+                          <linearGradient id="colorAreaReceitas" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.4}/>
+                            <stop offset="95%" stopColor="#10b981" stopOpacity={0.0}/>
+                          </linearGradient>
+                          <linearGradient id="colorAreaDespesas" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4}/>
+                            <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.0}/>
+                          </linearGradient>
+                        </defs>
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis
+                          dataKey="label"
+                          stroke="#94a3b8"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <RechartsYAxis
+                          stroke="#94a3b8"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
+                        />
+                        <RechartsTooltip content={<CustomTooltip />} />
+                        {hasReceitas && (
+                          <RechartsArea
+                            type="monotone"
+                            name="Receitas"
+                            dataKey="Receitas (Inflow)"
+                            stroke="#10b981"
+                            strokeWidth={2.5}
+                            fillOpacity={1}
+                            fill="url(#colorAreaReceitas)"
+                          />
+                        )}
+                        {hasDespesas && (
+                          <RechartsArea
+                            type="monotone"
+                            name="Despesas"
+                            dataKey="Despesas (Outflow)"
+                            stroke="#f43f5e"
+                            strokeWidth={2.5}
+                            fillOpacity={1}
+                            fill="url(#colorAreaDespesas)"
+                          />
+                        )}
+                      </RechartsAreaChart>
+                    ) : monthlyChartType === "radar" ? (
+                      <RechartsRadarChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 20, left: 20, bottom: 10 }}
+                      >
+                        <RechartsPolarGrid stroke="#e2e8f0" />
+                        <RechartsPolarAngleAxis dataKey="label" stroke="#64748b" fontSize={9} />
+                        <RechartsPolarRadiusAxis stroke="#cbd5e1" fontSize={8} />
+                        <RechartsTooltip content={<CustomTooltip />} />
+                        {hasReceitas && (
+                          <RechartsRadar
+                            name="Receitas"
+                            dataKey="Receitas (Inflow)"
+                            stroke="#10b981"
+                            fill="#10b981"
+                            fillOpacity={0.35}
+                          />
+                        )}
+                        {hasDespesas && (
+                          <RechartsRadar
+                            name="Despesas"
+                            dataKey="Despesas (Outflow)"
+                            stroke="#f43f5e"
+                            fill="#f43f5e"
+                            fillOpacity={0.35}
+                          />
+                        )}
+                      </RechartsRadarChart>
+                    ) : (
+                      <RechartsComposedChart
+                        data={monthlyData}
+                        margin={{ top: 10, right: 10, left: -22, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis
+                          dataKey="label"
+                          stroke="#94a3b8"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <RechartsYAxis
+                          stroke="#94a3b8"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
+                        />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        {hasReceitas && (
+                          <RechartsBar name="Receitas" dataKey="Receitas (Inflow)" fill="#10b981" radius={[4, 4, 0, 0]} barSize={20} />
+                        )}
+                        {hasDespesas && (
+                          <RechartsBar name="Despesas" dataKey="Despesas (Outflow)" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={20} />
+                        )}
+                        <RechartsLine
+                          type="monotone"
+                          name="Saldo Líquido"
+                          dataKey="Saldo Líquido"
+                          stroke="#6366f1"
+                          strokeWidth={2.5}
+                          dot={{ r: 3.5, fill: "#6366f1" }}
+                        />
+                      </RechartsComposedChart>
+                    )}
+                  </RechartsResponsiveContainer>
+                );
+              })()}
             </div>
           </div>
 
@@ -1081,34 +1920,93 @@ export function LeadpageDashboard({
                 </span>
                 <div>
                   <h3 className="font-bold text-sm text-slate-800">Distribuição por Categoria</h3>
-                  <p className="text-[11px] text-slate-450">Listagem de todas as categorias cadastradas</p>
+                  <p className="text-[11px] text-slate-450">Listagem das categorias cadastradas e filtradas</p>
                 </div>
+              </div>
+
+              {/* View mode toggle: Barras vs Donut vs Radar */}
+              <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold border border-slate-150">
+                <button
+                  type="button"
+                  onClick={() => setCategoryChartMode("bar")}
+                  className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                    categoryChartMode === "bar" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Exibir em Barras Horizontais"
+                >
+                  📊 Barras
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCategoryChartMode("pie")}
+                  className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                    categoryChartMode === "pie" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Exibir em Gráfico Donut/Pizza"
+                >
+                  🍩 Donut
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCategoryChartMode("radar")}
+                  className={`px-2 py-1 rounded-md transition cursor-pointer ${
+                    categoryChartMode === "radar" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  title="Exibir em Gráfico Radar"
+                >
+                  🕸️ Radar
+                </button>
               </div>
             </div>
 
             {/* CATEGORY CONTROLS */}
             <div className="flex items-center justify-between gap-1 mb-4">
-              {/* Income/Expense Tab Switcher */}
+              {/* Income/Expense/Mixed Tab Switcher with live counts */}
               <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold border border-slate-150">
                 <button
                   onClick={() => setActiveCategoryTab("saida")}
-                  className={`px-3 py-1 rounded-md transition duration-150 cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md transition duration-150 cursor-pointer flex items-center gap-1 ${
                     activeCategoryTab === "saida"
                       ? "bg-white text-rose-700 shadow-xs"
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                  Despesas (Todas)
+                  <span>Despesas</span>
+                  {categoryChartData.saidas.length > 0 && (
+                    <span className="px-1.5 py-0.2 bg-rose-100 text-rose-700 rounded-full text-[9px] font-mono">
+                      {categoryChartData.saidas.length}
+                    </span>
+                  )}
                 </button>
                 <button
                   onClick={() => setActiveCategoryTab("entrada")}
-                  className={`px-3 py-1 rounded-md transition duration-150 cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md transition duration-150 cursor-pointer flex items-center gap-1 ${
                     activeCategoryTab === "entrada"
                       ? "bg-white text-emerald-700 shadow-xs"
                       : "text-slate-500 hover:text-slate-700"
                   }`}
                 >
-                  Receitas
+                  <span>Receitas</span>
+                  {categoryChartData.entradas.length > 0 && (
+                    <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-700 rounded-full text-[9px] font-mono">
+                      {categoryChartData.entradas.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setActiveCategoryTab("misto")}
+                  className={`px-2.5 py-1 rounded-md transition duration-150 cursor-pointer flex items-center gap-1 ${
+                    activeCategoryTab === "misto"
+                      ? "bg-white text-indigo-700 shadow-xs"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  <span>Misto</span>
+                  {categoryChartData.misto.length > 0 && (
+                    <span className="px-1.5 py-0.2 bg-indigo-100 text-indigo-700 rounded-full text-[9px] font-mono">
+                      {categoryChartData.misto.length}
+                    </span>
+                  )}
                 </button>
               </div>
 
@@ -1139,88 +2037,186 @@ export function LeadpageDashboard({
               </div>
             </div>
 
-            {/* Previous Month comparison toggle */}
-            <div className="flex items-center justify-between text-[11px] mb-3 select-none">
-              <span className="text-slate-450 text-[10.5px]">Comparar com o mês anterior:</span>
-              <button
-                type="button"
-                onClick={() => setShowPrevMonthComparison(!showPrevMonthComparison)}
-                className={`px-2.5 py-1 rounded-md border font-extrabold h-6 flex items-center justify-center transition cursor-pointer select-none leading-none text-[10.5px] ${
-                  !showPrevMonthComparison 
-                    ? "bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700" 
-                    : "bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100/30"
-                }`}
-              >
-                {showPrevMonthComparison ? "Sim (Exibir)" : "Não (Ocultar)"}
-              </button>
-            </div>
+            {/* Previous Month comparison toggle (only relevant in bar mode) */}
+            {categoryChartMode === "bar" && (
+              <div className="flex items-center justify-between text-[11px] mb-3 select-none">
+                <span className="text-slate-450 text-[10.5px]">Comparar com o mês anterior:</span>
+                <button
+                  type="button"
+                  onClick={() => setShowPrevMonthComparison(!showPrevMonthComparison)}
+                  className={`px-2.5 py-1 rounded-md border font-extrabold h-6 flex items-center justify-center transition cursor-pointer select-none leading-none text-[10.5px] ${
+                    !showPrevMonthComparison 
+                      ? "bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700" 
+                      : "bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100/30"
+                  }`}
+                >
+                  {showPrevMonthComparison ? "Sim (Exibir)" : "Não (Ocultar)"}
+                </button>
+              </div>
+            )}
 
-            {/* BAR CHART VIEW */}
+            {/* CHART VIEW (BAR OR PIE OR RADAR) */}
             <div className="h-64 w-full text-xs font-mono select-none">
-              {(activeCategoryTab === "saida" ? categoryChartData.saidas.length : categoryChartData.entradas.length) > 0 ? (
-                <RechartsResponsiveContainer width="100%" height="100%">
-                  <RechartsBarChart
-                    data={activeCategoryTab === "saida" ? categoryChartData.saidas : categoryChartData.entradas}
-                    layout="vertical"
-                    margin={{ top: 0, right: 10, left: -10, bottom: 0 }}
-                  >
-                    <RechartsCartesianGrid strokeDasharray="2 2" stroke="#f8fafc" horizontal={false} />
-                    <RechartsXAxis
-                      type="number"
-                      stroke="#94a3b8"
-                      fontSize={9}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
-                    />
-                    <RechartsYAxis
-                      dataKey="name"
-                      type="category"
-                      stroke="#64748b"
-                      fontSize={9}
-                      width={100}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(val) => val.length > 15 ? val.slice(0, 14) + "..." : val}
-                    />
-                    <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f8fafc", opacity: 0.7 }} />
-                    <RechartsBar
-                      name="Mês Ativo"
-                      dataKey="Total"
-                      radius={[0, 4, 4, 0]}
-                      barSize={11}
-                    >
-                      {(activeCategoryTab === "saida" ? categoryChartData.saidas : categoryChartData.entradas).map((entry, index) => (
-                        <RechartsCell 
-                          key={`cell-${index}`} 
-                          fill={entry.fill}
-                          stroke={entry.fill}
-                          strokeWidth={0.5}
+              {(() => {
+                const currentBarData = activeCategoryTab === "saida" 
+                  ? categoryChartData.saidas 
+                  : activeCategoryTab === "entrada" 
+                    ? categoryChartData.entradas 
+                    : categoryChartData.misto;
+
+                if (currentBarData.length === 0) {
+                  return (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-1.5 select-none md:py-12">
+                      <HelpCircle size={22} className="stroke-1 text-slate-350" />
+                      <span className="text-xs font-bold text-slate-700">Nenhum lançamento no escopo</span>
+                      <p className="text-[10px] text-slate-400 max-w-2xs leading-normal">Não foram encontradas movimentações para esta aba ({activeCategoryTab === "saida" ? "Despesas" : activeCategoryTab === "entrada" ? "Receitas" : "Misto"}) no período selecionado.</p>
+                    </div>
+                  );
+                }
+
+                if (categoryChartMode === "pie") {
+                  const totalCategorySum = currentBarData.reduce((acc, curr) => acc + (curr.Total || 0), 0);
+                  return (
+                    <div className="h-full flex flex-col sm:flex-row items-center justify-center gap-3">
+                      <div className="h-full w-full sm:w-1/2 relative flex items-center justify-center">
+                        <RechartsResponsiveContainer width="100%" height="100%">
+                          <RechartsPieChart>
+                            <RechartsTooltip content={<CustomTooltip />} />
+                            <RechartsPie
+                              data={currentBarData}
+                              dataKey="Total"
+                              nameKey="name"
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={45}
+                              outerRadius={75}
+                              paddingAngle={2}
+                            >
+                              {currentBarData.map((entry, index) => (
+                                <RechartsCell 
+                                  key={`pie-cell-${index}`} 
+                                  fill={entry.fill}
+                                  stroke="#ffffff"
+                                  strokeWidth={1.5}
+                                />
+                              ))}
+                            </RechartsPie>
+                          </RechartsPieChart>
+                        </RechartsResponsiveContainer>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center">
+                          <span className="text-[8px] text-slate-400 uppercase font-bold tracking-wider">Total</span>
+                          <span className="text-[11px] font-mono font-black text-slate-700">
+                            R$ {totalCategorySum >= 1000 ? (totalCategorySum / 1000).toFixed(1) + "k" : totalCategorySum.toFixed(0)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Top 5 list */}
+                      <div className="w-full sm:w-1/2 max-h-56 overflow-y-auto space-y-1.5 pr-1 text-[10px]">
+                        {currentBarData.slice(0, 6).map((item) => {
+                          const pct = totalCategorySum > 0 ? ((item.Total / totalCategorySum) * 100).toFixed(1) : "0.0";
+                          return (
+                            <div key={item.name} className="flex items-center justify-between p-1.5 bg-slate-50 border border-slate-150 rounded-lg">
+                              <div className="flex items-center gap-1.5 truncate">
+                                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.fill }} />
+                                <span className="font-bold text-slate-600 truncate uppercase text-[9.5px]" title={item.name}>{item.name}</span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0 font-mono text-[9px]">
+                                <span className="text-slate-400 font-sans">({pct}%)</span>
+                                <span className="font-extrabold text-slate-700">R$ {item.Total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (categoryChartMode === "radar") {
+                  const radarColor = activeCategoryTab === "saida" ? "#f43f5e" : activeCategoryTab === "entrada" ? "#10b981" : "#6366f1";
+                  const topRadarData = currentBarData.slice(0, 8).map(d => ({
+                    ...d,
+                    shortName: d.name.length > 12 ? d.name.slice(0, 10) + "..." : d.name
+                  }));
+                  return (
+                    <RechartsResponsiveContainer width="100%" height="100%">
+                      <RechartsRadarChart data={topRadarData} margin={{ top: 10, right: 20, left: 20, bottom: 10 }}>
+                        <RechartsPolarGrid stroke="#e2e8f0" />
+                        <RechartsPolarAngleAxis dataKey="shortName" stroke="#64748b" fontSize={9} />
+                        <RechartsPolarRadiusAxis stroke="#cbd5e1" fontSize={8} />
+                        <RechartsTooltip content={<CustomTooltip />} />
+                        <RechartsRadar
+                          name="Total da Categoria"
+                          dataKey="Total"
+                          stroke={radarColor}
+                          fill={radarColor}
+                          fillOpacity={0.4}
                         />
-                      ))}
-                    </RechartsBar>
-                    {showPrevMonthComparison && periodScope === "filtered" && (
-                      <RechartsBar
-                        name="Mês Anterior"
-                        dataKey="PrevTotal"
-                        fill="#94a3b8"
-                        fillOpacity={0.35}
-                        stroke="#64748b"
-                        strokeWidth={1}
-                        strokeDasharray="2 2"
-                        radius={[0, 4, 4, 0]}
-                        barSize={7}
+                      </RechartsRadarChart>
+                    </RechartsResponsiveContainer>
+                  );
+                }
+
+                return (
+                  <RechartsResponsiveContainer width="100%" height="100%">
+                    <RechartsBarChart
+                      data={currentBarData}
+                      layout="vertical"
+                      margin={{ top: 0, right: 10, left: -10, bottom: 0 }}
+                    >
+                      <RechartsCartesianGrid strokeDasharray="2 2" stroke="#f8fafc" horizontal={false} />
+                      <RechartsXAxis
+                        type="number"
+                        stroke="#94a3b8"
+                        fontSize={9}
+                        tickLine={false}
+                        axisLine={false}
+                        tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`}
                       />
-                    )}
-                  </RechartsBarChart>
-                </RechartsResponsiveContainer>
-              ) : (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-1.5 select-none md:py-12">
-                  <HelpCircle size={22} className="stroke-1 text-slate-350" />
-                  <span className="text-xs font-bold text-slate-700">Nenhum lançamento no escopo</span>
-                  <p className="text-[10px] text-slate-400 max-w-2xs leading-normal">Não foram encontradas despesas/receitas neste período nesta configuração.</p>
-                </div>
-              )}
+                      <RechartsYAxis
+                        dataKey="name"
+                        type="category"
+                        stroke="#64748b"
+                        fontSize={9}
+                        width={100}
+                        tickLine={false}
+                        axisLine={false}
+                        tickFormatter={(val) => val.length > 15 ? val.slice(0, 14) + "..." : val}
+                      />
+                      <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f8fafc", opacity: 0.7 }} />
+                      <RechartsBar
+                        name="Mês Ativo"
+                        dataKey="Total"
+                        radius={[0, 4, 4, 0]}
+                        barSize={11}
+                      >
+                        {currentBarData.map((entry, index) => (
+                          <RechartsCell 
+                            key={`cell-${index}`} 
+                            fill={entry.fill}
+                            stroke={entry.fill}
+                            strokeWidth={0.5}
+                          />
+                        ))}
+                      </RechartsBar>
+                      {showPrevMonthComparison && periodScope === "filtered" && (
+                        <RechartsBar
+                          name="Mês Anterior"
+                          dataKey="PrevTotal"
+                          fill="#94a3b8"
+                          fillOpacity={0.35}
+                          stroke="#64748b"
+                          strokeWidth={1}
+                          strokeDasharray="2 2"
+                          radius={[0, 4, 4, 0]}
+                          barSize={7}
+                        />
+                      )}
+                    </RechartsBarChart>
+                  </RechartsResponsiveContainer>
+                );
+              })()}
             </div>
           </div>
 
@@ -1318,14 +2314,96 @@ export function LeadpageDashboard({
                   </select>
                 </div>
               )}
+
+              {/* Category Multi-Select Input */}
+              <CategoryMultiSelectDropdown
+                label="Categorias"
+                allCategories={availableCategoriesList}
+                selectedCategories={flowCategoryFilters}
+                onChange={(newSelected) => {
+                  setFlowCategoryFilters(newSelected);
+                  setActiveDailyDetail(null);
+                }}
+              />
             </div>
           </div>
+
+          {/* Active Flow Category Badge notification */}
+          {flowCategoryFilters.length > 0 && (
+            <div className="mb-5 p-2 bg-indigo-50/70 border border-indigo-200 text-indigo-800 text-xs rounded-xl flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="flex items-center gap-1 font-bold text-indigo-700 text-[11px]">
+                  <Filter size={12} className="text-indigo-600" />
+                  Filtrando {flowCategoryFilters.length} {flowCategoryFilters.length === 1 ? "categoria" : "categorias"}:
+                </span>
+                {flowCategoryFilters.map(cat => {
+                  const isEntrada = CATEGORIES_ENTRADA.includes(cat);
+                  return (
+                    <span
+                      key={cat}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-white border border-indigo-200 text-indigo-900 shadow-3xs"
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${isEntrada ? "bg-emerald-500" : "bg-rose-500"}`} />
+                      {cat}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFlowCategoryFilters(prev => prev.filter(c => c !== cat));
+                          setActiveDailyDetail(null);
+                        }}
+                        className="hover:text-rose-600 cursor-pointer ml-0.5 p-0.5 text-slate-400"
+                        title={`Remover filtro ${cat}`}
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                onClick={() => { setFlowCategoryFilters([]); setActiveDailyDetail(null); }}
+                className="text-[10px] font-bold text-indigo-700 hover:text-rose-600 flex items-center gap-1 cursor-pointer bg-white px-2 py-1 rounded-lg border border-indigo-200 shadow-3xs"
+              >
+                <X size={11} /> Limpar Filtro (Ver Todas)
+              </button>
+            </div>
+          )}
 
           {/* TIME CONTAINER INJECTIONS */}
 
           {/* 1. VIEW ANUAL */}
           {timeframe === "anual" && (
             <div className="space-y-6">
+              {/* Year summary cards & chart toggle */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Consolidado do Ano de {selectedYr}
+                </span>
+
+                {/* View Mode Toggle: Cards vs Chart */}
+                <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold border border-slate-150">
+                  <button
+                    type="button"
+                    onClick={() => setAnnualViewMode("cards")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      annualViewMode === "cards" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    🃏 Grade de Cartões
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnnualViewMode("chart")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      annualViewMode === "chart" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    📈 Gráfico Anual
+                  </button>
+                </div>
+              </div>
+
               {/* Year summary cards */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100/50">
@@ -1354,8 +2432,47 @@ export function LeadpageDashboard({
                 </div>
               </div>
 
-              {/* Months progress list */}
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {/* Annual Chart Render Mode */}
+              {annualViewMode === "chart" ? (
+                <div className="bg-slate-50/50 border border-slate-200/80 rounded-2xl p-5 shadow-3xs">
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-tight flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-indigo-600" />
+                      Evolução das 12 Competências de {selectedYr}
+                    </span>
+                    <div className="text-[10px] text-slate-400 flex items-center gap-3">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-xs inline-block" /> Receitas
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-rose-500 rounded-xs inline-block" /> Despesas
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-indigo-500 rounded-xs inline-block" /> Saldo Líquido
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="h-72 w-full text-xs font-mono">
+                    <RechartsResponsiveContainer width="100%" height="100%">
+                      <RechartsComposedChart
+                        data={annualAggregation.monthlySum}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis dataKey="label" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                        <RechartsYAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`} />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        <RechartsBar name="Receitas" dataKey="entrada" fill="#10b981" radius={[4, 4, 0, 0]} barSize={22} />
+                        <RechartsBar name="Despesas" dataKey="saida" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={22} />
+                        <RechartsLine type="monotone" name="Saldo Líquido" dataKey="saldo" stroke="#6366f1" strokeWidth={2.5} dot={{ r: 3.5, fill: "#6366f1" }} />
+                      </RechartsComposedChart>
+                    </RechartsResponsiveContainer>
+                  </div>
+                </div>
+              ) : (
+                /* Months progress list cards */
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {annualAggregation.monthlySum.map((item) => {
                   const hasActivity = item.entrada > 0 || item.saida > 0;
                   return (
@@ -1541,6 +2658,7 @@ export function LeadpageDashboard({
                   );
                 })}
               </div>
+              )}
 
               {/* Insigths card */}
               <div className="p-4 bg-indigo-50/35 border border-indigo-100/80 rounded-2xl flex flex-col md:flex-row md:items-center justify-between text-xs gap-3">
@@ -1710,155 +2828,298 @@ export function LeadpageDashboard({
                       const ReceitasTooltip = CreateCustomPieTooltip(totalReceitas);
                       const DespesasTooltip = CreateCustomPieTooltip(totalDespesas);
 
-                      return (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs select-none">
-                          {/* Receitas Donut Column */}
-                          <div className="p-4 bg-white/50 border border-slate-150 rounded-xl flex flex-col justify-between">
-                            <div>
-                              <h5 className="font-bold text-[11px] uppercase tracking-wider text-emerald-600 mb-2 flex items-center gap-1.5 border-b border-slate-100 pb-1.5">
+                      const totalMovimentado = totalReceitas + totalDespesas;
+                      const filteredMisto = [
+                        { name: "Receitas", Total: totalReceitas, fill: "#10b981" },
+                        { name: "Despesas", Total: totalDespesas, fill: "#f43f5e" }
+                      ].filter(item => item.Total > 0);
+                      const saldoMes = totalReceitas - totalDespesas;
+                      const MistoTooltip = CreateCustomPieTooltip(totalMovimentado);
+
+                      const hasReceitas = filteredReceitas.length > 0 && totalReceitas > 0;
+                      const hasDespesas = filteredDespesas.length > 0 && totalDespesas > 0;
+
+                      if (!hasReceitas && !hasDespesas) {
+                        return (
+                          <div className="py-12 text-center text-slate-400 font-semibold flex flex-col items-center gap-2 justify-center bg-white/40 rounded-2xl border border-dashed border-slate-200">
+                            <HelpCircle size={20} className="text-slate-350" />
+                            <span className="text-xs text-slate-600 font-bold">Nenhuma movimentação registrada</span>
+                            <p className="text-[10.5px] text-slate-400 max-w-xs leading-normal">Não foram encontrados valores maiores que zero para as categorias e período selecionados.</p>
+                          </div>
+                        );
+                      }
+
+                      // Render Donut Column Helper
+                      const renderReceitasColumn = (colSpanClass = "") => (
+                        <div className={`p-4 bg-white/70 border border-slate-150 rounded-2xl flex flex-col justify-between shadow-3xs ${colSpanClass}`}>
+                          <div>
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-1.5 mb-2">
+                              <h5 className="font-bold text-[11px] uppercase tracking-wider text-emerald-600 flex items-center gap-1.5">
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                 Receitas / Entradas
                               </h5>
-                              
-                              {filteredReceitas.length > 0 ? (
-                                <div className="space-y-4">
-                                  <div className="h-[140px] relative flex items-center justify-center">
-                                    <RechartsResponsiveContainer width="100%" height="100%">
-                                      <RechartsPieChart>
-                                        <RechartsTooltip content={<ReceitasTooltip />} />
-                                        <RechartsPie
-                                          data={filteredReceitas}
-                                          dataKey="Total"
-                                          nameKey="name"
-                                          cx="50%"
-                                          cy="50%"
-                                          innerRadius={35}
-                                          outerRadius={55}
-                                          paddingAngle={3}
-                                          minAngle={15}
-                                        >
-                                          {filteredReceitas.map((entry, index) => (
-                                            <RechartsCell 
-                                              key={`cell-${index}`} 
-                                              fill={entry.fill}
-                                              stroke="#ffffff"
-                                              strokeWidth={1.5}
-                                            />
-                                          ))}
-                                        </RechartsPie>
-                                      </RechartsPieChart>
-                                    </RechartsResponsiveContainer>
-                                    
-                                    {/* Centered sum */}
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                      <span className="text-[7.5px] text-slate-400 font-extrabold uppercase tracking-widest leading-none mb-0.5">Total</span>
-                                      <span className="text-[11px] font-black text-emerald-600 font-mono">
-                                        R$ {totalReceitas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
-                                      </span>
-                                    </div>
-                                  </div>
+                              <span className="text-[9.5px] font-bold font-mono text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                                {filteredReceitas.length} categorias
+                              </span>
+                            </div>
+                            
+                            <div className="space-y-4">
+                              <div className="h-[145px] relative flex items-center justify-center">
+                                <RechartsResponsiveContainer width="100%" height="100%">
+                                  <RechartsPieChart>
+                                    <RechartsTooltip content={<ReceitasTooltip />} />
+                                    <RechartsPie
+                                      data={filteredReceitas}
+                                      dataKey="Total"
+                                      nameKey="name"
+                                      cx="50%"
+                                      cy="50%"
+                                      innerRadius={38}
+                                      outerRadius={58}
+                                      paddingAngle={3}
+                                      minAngle={15}
+                                    >
+                                      {filteredReceitas.map((entry, index) => (
+                                        <RechartsCell 
+                                          key={`cell-${index}`} 
+                                          fill={entry.fill}
+                                          stroke="#ffffff"
+                                          strokeWidth={1.5}
+                                        />
+                                      ))}
+                                    </RechartsPie>
+                                  </RechartsPieChart>
+                                </RechartsResponsiveContainer>
+                                
+                                {/* Centered sum */}
+                                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                  <span className="text-[7.5px] text-slate-400 font-extrabold uppercase tracking-widest leading-none mb-0.5">Total</span>
+                                  <span className="text-[11px] font-black text-emerald-600 font-mono">
+                                    R$ {totalReceitas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              </div>
 
-                                  {/* Legend list */}
-                                  <div className="max-h-[140px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin">
-                                    {filteredReceitas.map((item) => {
-                                      const realPct = totalReceitas > 0 ? ((item.Total / totalReceitas) * 100).toFixed(1) : "0.0";
-                                      return (
-                                        <div key={item.name} className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs hover:bg-slate-100/50 transition leading-none">
-                                          <div className="flex items-center gap-1.5 truncate">
-                                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.fill }} />
-                                            <span className="text-[10px] font-bold text-slate-600 truncate uppercase">{item.name}</span>
-                                          </div>
-                                          <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
-                                            <span className="text-slate-450 font-semibold font-sans">({realPct}%)</span>
-                                            <span className="font-extrabold text-slate-705">R$ {item.Total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</span>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="py-12 text-center text-slate-400 font-semibold flex flex-col items-center gap-1 justify-center bg-white/20 rounded-xl border border-dashed border-slate-200">
-                                  <HelpCircle size={16} className="text-slate-350" />
-                                  <span className="text-[10px]">Nenhuma receita neste mês</span>
-                                </div>
-                              )}
+                              {/* Legend list */}
+                              <div className="max-h-[145px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin">
+                                {filteredReceitas.map((item) => {
+                                  const realPct = totalReceitas > 0 ? ((item.Total / totalReceitas) * 100).toFixed(1) : "0.0";
+                                  return (
+                                    <div key={item.name} className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs hover:bg-slate-100/50 transition leading-none">
+                                      <div className="flex items-center gap-1.5 truncate">
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.fill }} />
+                                        <span className="text-[10px] font-bold text-slate-600 truncate uppercase">{item.name}</span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
+                                        <span className="text-slate-450 font-semibold font-sans">({realPct}%)</span>
+                                        <span className="font-extrabold text-slate-705">R$ {item.Total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
                           </div>
+                        </div>
+                      );
 
-                          {/* Despesas Donut Column */}
-                          <div className="p-4 bg-white/50 border border-slate-150 rounded-xl flex flex-col justify-between">
-                            <div>
-                              <h5 className="font-bold text-[11px] uppercase tracking-wider text-rose-600 mb-2 flex items-center gap-1.5 border-b border-slate-100 pb-1.5">
+                      const renderDespesasColumn = (colSpanClass = "") => (
+                        <div className={`p-4 bg-white/70 border border-slate-150 rounded-2xl flex flex-col justify-between shadow-3xs ${colSpanClass}`}>
+                          <div>
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-1.5 mb-2">
+                              <h5 className="font-bold text-[11px] uppercase tracking-wider text-rose-600 flex items-center gap-1.5">
                                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
                                 Despesas / Saídas
                               </h5>
+                              <span className="text-[9.5px] font-bold font-mono text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded">
+                                {filteredDespesas.length} categorias
+                              </span>
+                            </div>
 
-                              {filteredDespesas.length > 0 ? (
-                                <div className="space-y-4">
-                                  <div className="h-[140px] relative flex items-center justify-center">
-                                    <RechartsResponsiveContainer width="100%" height="100%">
-                                      <RechartsPieChart>
-                                        <RechartsTooltip content={<DespesasTooltip />} />
-                                        <RechartsPie
-                                          data={filteredDespesas}
-                                          dataKey="Total"
-                                          nameKey="name"
-                                          cx="50%"
-                                          cy="50%"
-                                          innerRadius={35}
-                                          outerRadius={55}
-                                          paddingAngle={3}
-                                          minAngle={15}
-                                        >
-                                          {filteredDespesas.map((entry, index) => (
-                                            <RechartsCell 
-                                              key={`cell-${index}`} 
-                                              fill={entry.fill}
-                                              stroke="#ffffff"
-                                              strokeWidth={1.5}
-                                            />
-                                          ))}
-                                        </RechartsPie>
-                                      </RechartsPieChart>
-                                    </RechartsResponsiveContainer>
-                                    
-                                    {/* Centered sum */}
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                      <span className="text-[7.5px] text-slate-400 font-extrabold uppercase tracking-widest leading-none mb-0.5">Total</span>
-                                      <span className="text-[11px] font-black text-rose-600 font-mono">
-                                        R$ {totalDespesas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
-                                      </span>
+                            <div className="space-y-4">
+                              <div className="h-[145px] relative flex items-center justify-center">
+                                <RechartsResponsiveContainer width="100%" height="100%">
+                                  <RechartsPieChart>
+                                    <RechartsTooltip content={<DespesasTooltip />} />
+                                    <RechartsPie
+                                      data={filteredDespesas}
+                                      dataKey="Total"
+                                      nameKey="name"
+                                      cx="50%"
+                                      cy="50%"
+                                      innerRadius={38}
+                                      outerRadius={58}
+                                      paddingAngle={3}
+                                      minAngle={15}
+                                    >
+                                      {filteredDespesas.map((entry, index) => (
+                                        <RechartsCell 
+                                          key={`cell-${index}`} 
+                                          fill={entry.fill}
+                                          stroke="#ffffff"
+                                          strokeWidth={1.5}
+                                        />
+                                      ))}
+                                    </RechartsPie>
+                                  </RechartsPieChart>
+                                </RechartsResponsiveContainer>
+                                
+                                {/* Centered sum */}
+                                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                  <span className="text-[7.5px] text-slate-400 font-extrabold uppercase tracking-widest leading-none mb-0.5">Total</span>
+                                  <span className="text-[11px] font-black text-rose-600 font-mono">
+                                    R$ {totalDespesas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Legend list */}
+                              <div className="max-h-[145px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin">
+                                {filteredDespesas.map((item) => {
+                                  const realPct = totalDespesas > 0 ? ((item.Total / totalDespesas) * 100).toFixed(1) : "0.0";
+                                  return (
+                                    <div key={item.name} className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs hover:bg-slate-100/50 transition leading-none">
+                                      <div className="flex items-center gap-1.5 truncate">
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.fill }} />
+                                        <span className="text-[10px] font-bold text-slate-600 truncate uppercase">{item.name}</span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
+                                        <span className="text-slate-450 font-semibold font-sans">({realPct}%)</span>
+                                        <span className="font-extrabold text-slate-705">R$ {item.Total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</span>
+                                      </div>
                                     </div>
-                                  </div>
-
-                                  {/* Legend list */}
-                                  <div className="max-h-[140px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin">
-                                    {filteredDespesas.map((item) => {
-                                      const realPct = totalDespesas > 0 ? ((item.Total / totalDespesas) * 100).toFixed(1) : "0.0";
-                                      return (
-                                        <div key={item.name} className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs hover:bg-slate-100/50 transition leading-none">
-                                          <div className="flex items-center gap-1.5 truncate">
-                                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.fill }} />
-                                            <span className="text-[10px] font-bold text-slate-600 truncate uppercase">{item.name}</span>
-                                          </div>
-                                          <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
-                                            <span className="text-slate-450 font-semibold font-sans">({realPct}%)</span>
-                                            <span className="font-extrabold text-slate-705">R$ {item.Total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</span>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="py-12 text-center text-slate-400 font-semibold flex flex-col items-center gap-1 justify-center bg-white/20 rounded-xl border border-dashed border-slate-200">
-                                  <HelpCircle size={16} className="text-slate-350" />
-                                  <span className="text-[10px]">Nenhuma despesa neste mês</span>
-                                </div>
-                              )}
+                                  );
+                                })}
+                              </div>
                             </div>
                           </div>
+                        </div>
+                      );
+
+                      const renderMistoColumn = (colSpanClass = "") => (
+                        <div className={`p-4 bg-white/70 border border-slate-150 rounded-2xl flex flex-col justify-between shadow-3xs ${colSpanClass}`}>
+                          <div>
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-1.5 mb-2">
+                              <h5 className="font-bold text-[11px] uppercase tracking-wider text-indigo-700 flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                                Misto (Entradas x Saídas)
+                              </h5>
+                              <span className="text-[9.5px] font-bold font-mono text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">
+                                Consolidado
+                              </span>
+                            </div>
+
+                            <div className="space-y-4">
+                              <div className="h-[145px] relative flex items-center justify-center">
+                                <RechartsResponsiveContainer width="100%" height="100%">
+                                  <RechartsPieChart>
+                                    <RechartsTooltip content={<MistoTooltip />} />
+                                    <RechartsPie
+                                      data={filteredMisto}
+                                      dataKey="Total"
+                                      nameKey="name"
+                                      cx="50%"
+                                      cy="50%"
+                                      innerRadius={38}
+                                      outerRadius={58}
+                                      paddingAngle={3}
+                                      minAngle={15}
+                                    >
+                                      {filteredMisto.map((entry, index) => (
+                                        <RechartsCell 
+                                          key={`cell-${index}`} 
+                                          fill={entry.fill}
+                                          stroke="#ffffff"
+                                          strokeWidth={1.5}
+                                        />
+                                      ))}
+                                    </RechartsPie>
+                                  </RechartsPieChart>
+                                </RechartsResponsiveContainer>
+                                
+                                {/* Centered sum: Saldo Líquido */}
+                                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                  <span className="text-[7.5px] text-slate-400 font-extrabold uppercase tracking-widest leading-none mb-0.5">Saldo</span>
+                                  <span className={`text-[11px] font-black font-mono ${saldoMes >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                                    {saldoMes >= 0 ? "+" : ""}R$ {saldoMes.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Legend list */}
+                              <div className="max-h-[145px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin">
+                                <div className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs leading-none">
+                                  <div className="flex items-center gap-1.5 truncate">
+                                    <span className="w-2 h-2 rounded-full shrink-0 bg-emerald-500" />
+                                    <span className="text-[10px] font-bold text-slate-600 truncate uppercase">Receitas</span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
+                                    <span className="text-slate-450 font-semibold font-sans">
+                                      ({((totalReceitas / (totalMovimentado || 1)) * 100).toFixed(1)}%)
+                                    </span>
+                                    <span className="font-extrabold text-emerald-600">
+                                      R$ {totalReceitas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between p-1.5 bg-white border border-slate-150 rounded-lg shadow-3xs leading-none">
+                                  <div className="flex items-center gap-1.5 truncate">
+                                    <span className="w-2 h-2 rounded-full shrink-0 bg-rose-500" />
+                                    <span className="text-[10px] font-bold text-slate-600 truncate uppercase">Despesas</span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 shrink-0 font-mono text-[9.5px]">
+                                    <span className="text-slate-450 font-semibold font-sans">
+                                      ({((totalDespesas / (totalMovimentado || 1)) * 100).toFixed(1)}%)
+                                    </span>
+                                    <span className="font-extrabold text-rose-600">
+                                      R$ {totalDespesas.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between p-1.5 bg-indigo-50/60 border border-indigo-150 rounded-lg leading-none">
+                                  <span className="text-[9.5px] font-bold text-indigo-900 uppercase">Resultado</span>
+                                  <span className={`font-mono text-[9.5px] font-black ${saldoMes >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                    {saldoMes >= 0 ? "Lucro: " : "Déficit: "}R$ {Math.abs(saldoMes).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+
+                      // If ONLY Despesas exist:
+                      if (!hasReceitas && hasDespesas) {
+                        return (
+                          <div className="max-w-md mx-auto w-full text-xs select-none">
+                            <div className="mb-2 text-center text-[10px] text-slate-400 italic">
+                              Exibindo exclusivamente o gráfico de despesas (filtro de categorias sem receitas)
+                            </div>
+                            {renderDespesasColumn()}
+                          </div>
+                        );
+                      }
+
+                      // If ONLY Receitas exist:
+                      if (hasReceitas && !hasDespesas) {
+                        return (
+                          <div className="max-w-md mx-auto w-full text-xs select-none">
+                            <div className="mb-2 text-center text-[10px] text-slate-400 italic">
+                              Exibindo exclusivamente o gráfico de receitas (filtro de categorias sem despesas)
+                            </div>
+                            {renderReceitasColumn()}
+                          </div>
+                        );
+                      }
+
+                      // If BOTH exist:
+                      return (
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs select-none">
+                          {renderReceitasColumn()}
+                          {renderDespesasColumn()}
+                          {renderMistoColumn()}
                         </div>
                       );
                     })()}
@@ -1871,11 +3132,73 @@ export function LeadpageDashboard({
           {/* 3. VIEW SEMANAL */}
           {timeframe === "semanal" && (
             <div className="space-y-4">
-              <div className="text-xs text-slate-500 mb-2 font-semibold">
-                Divisão semanal do saldo líquido para o mês de <span className="font-bold text-slate-700">{getSelectedMonthLabel()} de {selectedYr}</span>:
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                <div className="text-xs text-slate-500 font-semibold">
+                  Divisão semanal do saldo líquido para o mês de <span className="font-bold text-slate-700">{getSelectedMonthLabel()} de {selectedYr}</span>:
+                </div>
+
+                {/* View Mode Toggle: Cards vs Chart */}
+                <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold border border-slate-150">
+                  <button
+                    type="button"
+                    onClick={() => setWeeklyViewMode("cards")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      weeklyViewMode === "cards" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    📋 Lista Semanal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWeeklyViewMode("chart")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      weeklyViewMode === "chart" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    📊 Gráfico Semanal
+                  </button>
+                </div>
               </div>
 
-              <div className="flex flex-col gap-3">
+              {weeklyViewMode === "chart" ? (
+                <div className="bg-slate-50/50 border border-slate-200/80 rounded-2xl p-5 shadow-3xs">
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-tight flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-indigo-600" />
+                      Evolução Semanal de {getSelectedMonthLabel()} / {selectedYr}
+                    </span>
+                    <div className="text-[10px] text-slate-400 flex items-center gap-3">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-xs inline-block" /> Receitas
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-rose-500 rounded-xs inline-block" /> Despesas
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-indigo-500 rounded-xs inline-block" /> Saldo Líquido
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="h-64 w-full text-xs font-mono">
+                    <RechartsResponsiveContainer width="100%" height="100%">
+                      <RechartsComposedChart
+                        data={weeklyAggregation}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      >
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis dataKey="label" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                        <RechartsYAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`} />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        <RechartsBar name="Receitas" dataKey="entrada" fill="#10b981" radius={[4, 4, 0, 0]} barSize={28} />
+                        <RechartsBar name="Despesas" dataKey="saida" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={28} />
+                        <RechartsLine type="monotone" name="Saldo Líquido" dataKey="saldo" stroke="#6366f1" strokeWidth={2.5} dot={{ r: 4, fill: "#6366f1" }} />
+                      </RechartsComposedChart>
+                    </RechartsResponsiveContainer>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
                 {weeklyAggregation.map((w, index) => {
                   const hasWActivity = w.entrada > 0 || w.saida > 0;
                   return (
@@ -1926,18 +3249,92 @@ export function LeadpageDashboard({
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
           {/* 4. VIEW DIARIO */}
           {timeframe === "diario" && (
             <div className="space-y-4">
-              <div className="text-xs text-slate-500 font-semibold mb-3">
-                Distribuição diária dinâmica para o mês de <span className="font-bold text-slate-700">{getSelectedMonthLabel()} de {selectedYr}</span>. Clique em um dia relevante para inspecionar os lançamentos e movimentações de caixa:
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                <div className="text-xs text-slate-500 font-semibold">
+                  Distribuição diária para o mês de <span className="font-bold text-slate-700">{getSelectedMonthLabel()} de {selectedYr}</span>:
+                </div>
+
+                {/* View Mode Toggle: Calendar vs Chart */}
+                <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold border border-slate-150">
+                  <button
+                    type="button"
+                    onClick={() => setDailyViewMode("cards")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      dailyViewMode === "cards" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    📅 Calendário & Cards
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDailyViewMode("chart")}
+                    className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      dailyViewMode === "chart" ? "bg-white text-indigo-700 shadow-xs" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    📈 Curva Diária
+                  </button>
+                </div>
               </div>
 
-              {/* Grid map of days of the month */}
-              <div className="grid grid-cols-4 sm:grid-cols-7 lg:grid-cols-10 gap-2 mb-4">
+              {dailyViewMode === "chart" ? (
+                <div className="bg-slate-50/50 border border-slate-200/80 rounded-2xl p-5 shadow-3xs">
+                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-tight flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-indigo-600" />
+                      Evolução Diária e Saldo Acumulado ({getSelectedMonthLabel()} / {selectedYr})
+                    </span>
+                    <div className="text-[10px] text-slate-400 flex items-center gap-3">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-xs inline-block" /> Receita Dia
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-rose-500 rounded-xs inline-block" /> Despesa Dia
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 bg-indigo-500 rounded-xs inline-block" /> Saldo Acumulado
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="h-72 w-full text-xs font-mono">
+                    <RechartsResponsiveContainer width="100%" height="100%">
+                      <RechartsComposedChart
+                        data={dailyAggregation.dailyList}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      >
+                        <defs>
+                          <linearGradient id="colorDailyCumulative" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
+                            <stop offset="95%" stopColor="#6366f1" stopOpacity={0.0}/>
+                          </linearGradient>
+                        </defs>
+                        <RechartsCartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <RechartsXAxis dataKey="day" stroke="#94a3b8" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(d) => `${d}`} />
+                        <RechartsYAxis stroke="#94a3b8" fontSize={9} tickLine={false} axisLine={false} tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`} />
+                        <RechartsTooltip content={<CustomTooltip />} cursor={{ fill: "#f1f5f9", opacity: 0.6 }} />
+                        <RechartsBar name="Receitas" dataKey="entrada" fill="#10b981" radius={[2, 2, 0, 0]} barSize={8} />
+                        <RechartsBar name="Despesas" dataKey="saida" fill="#f43f5e" radius={[2, 2, 0, 0]} barSize={8} />
+                        <RechartsArea type="monotone" name="Saldo Acumulado" dataKey="cumulative" stroke="#6366f1" strokeWidth={2} fill="url(#colorDailyCumulative)" />
+                      </RechartsComposedChart>
+                    </RechartsResponsiveContainer>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="text-xs text-slate-500 font-semibold mb-3">
+                    Clique em um dia relevante para inspecionar os lançamentos e movimentações de caixa:
+                  </div>
+
+                  {/* Grid map of days of the month */}
+                  <div className="grid grid-cols-4 sm:grid-cols-7 lg:grid-cols-10 gap-2 mb-4">
                 {dailyAggregation.dailyList.map(item => {
                   const hasDActivity = item.entrada > 0 || item.saida > 0;
                   const isSelected = activeDailyDetail === item.day;
@@ -2164,11 +3561,374 @@ export function LeadpageDashboard({
                   </div>
                 );
               })()}
+                </>
+              )}
             </div>
           )}
 
         </div>
       </div>
+
+      {/* --- DEDICATED PRINT REPORT MODAL (RELATÓRIO DE GRÁFICOS) --- */}
+      <AnimatePresence>
+        {isPrintReportModalOpen && (
+          <div className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto print:p-0 print:bg-white print:static print:overflow-visible print:inset-auto print:z-auto">
+            <style>{`
+              @media print {
+                body * {
+                  visibility: hidden;
+                }
+                #chart-report-printable-area, #chart-report-printable-area * {
+                  visibility: visible;
+                }
+                #chart-report-printable-area {
+                  position: absolute;
+                  left: 0;
+                  top: 0;
+                  width: 100% !important;
+                  margin: 0 !important;
+                  padding: 16px !important;
+                  box-shadow: none !important;
+                  border: none !important;
+                }
+                .no-print {
+                  display: none !important;
+                }
+              }
+            `}</style>
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 15 }}
+              transition={{ duration: 0.18 }}
+              className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden text-slate-800 print:max-h-none print:shadow-none print:border-none print:rounded-none"
+            >
+              {/* Modal Top Control Bar (Hidden on print) */}
+              <div className="no-print p-4 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <span className="p-2 bg-indigo-600 rounded-xl text-white">
+                    <Printer size={18} />
+                  </span>
+                  <div>
+                    <h3 className="font-extrabold text-sm tracking-tight text-white flex items-center gap-2">
+                      <span>Relatório de Gráficos & Indicadores</span>
+                      <span className="px-2 py-0.5 bg-indigo-500/30 text-indigo-300 rounded-md text-[10px] font-mono">
+                        Impressão / PDF
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Visualização formatada para exportação em PDF e impressão em folha A4.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black transition shadow-md cursor-pointer select-none"
+                  >
+                    <Printer size={14} />
+                    <span>Imprimir / Salvar PDF</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsPrintReportModalOpen(false)}
+                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+                    title="Fechar Relatório"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Scrollable Printable Document Body */}
+              <div className="p-6 sm:p-10 overflow-y-auto space-y-8 print:p-0 print:overflow-visible" id="chart-report-printable-area">
+                
+                {/* 1. DOCUMENT HEADER */}
+                <div className="border-b-2 border-slate-900 pb-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-indigo-700 block mb-0.5">
+                        CONTROLE DE CAIXA INTELIGENTE
+                      </span>
+                      <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                        RELATÓRIO GERENCIAL DE INDICADORES & GRÁFICOS
+                      </h1>
+                      <p className="text-xs text-slate-500 mt-1 font-medium">
+                        Demonstrativo financeiro analítico e representação gráfica de receitas, despesas e fluxo de caixa.
+                      </p>
+                    </div>
+
+                    <div className="sm:text-right text-xs space-y-1 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                      <div>
+                        <span className="text-slate-400 text-[10px] uppercase font-bold">Emissão: </span>
+                        <span className="font-bold text-slate-700">
+                          {new Date().toLocaleDateString("pt-BR")} às {new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 text-[10px] uppercase font-bold">Caixa: </span>
+                        <span className="font-black text-indigo-900">{caixaFilter === "active" ? activeCaixaName : "Todos os Caixas"}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 text-[10px] uppercase font-bold">Período: </span>
+                        <span className="font-bold text-slate-800">{activeMonthLabel}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Filtered Categories Notification in Report */}
+                  <div className="mt-4 pt-3 border-t border-slate-200/80 flex flex-wrap items-center gap-1.5 text-xs">
+                    <span className="text-[11px] font-extrabold text-slate-700 flex items-center gap-1 mr-1 uppercase tracking-wider">
+                      <Filter size={12} className="text-indigo-600" />
+                      Filtro de Categorias Aplicado:
+                    </span>
+                    {dashboardCategoryFilters.length > 0 ? (
+                      dashboardCategoryFilters.map(cat => {
+                        const isEntrada = CATEGORIES_ENTRADA.includes(cat);
+                        return (
+                          <span
+                            key={cat}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-bold bg-slate-100 border border-slate-250 text-slate-800"
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${isEntrada ? "bg-emerald-500" : "bg-rose-500"}`} />
+                            {cat}
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="text-slate-500 font-bold bg-slate-100 px-2.5 py-0.5 rounded-md text-[11px]">
+                        Todas as Categorias Cadastradas
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. SUMMARY KPI STATS CARDS */}
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 mb-3 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-xs bg-indigo-600" />
+                    1. Indicadores Consolidados
+                  </h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                      <span className="text-[9.5px] uppercase font-bold text-slate-500 block">Receitas Acumuladas</span>
+                      <span className="text-base font-black text-emerald-600 font-mono block mt-1">
+                        R$ {leadStats.totalEntradas.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                      <span className="text-[9.5px] uppercase font-bold text-slate-500 block">Total de Despesas</span>
+                      <span className="text-base font-black text-rose-600 font-mono block mt-1">
+                        R$ {leadStats.totalSaidas.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                      <span className="text-[9.5px] uppercase font-bold text-slate-500 block">Saldo Líquido</span>
+                      <span className={`text-base font-black font-mono block mt-1 ${leadStats.netBalance >= 0 ? "text-indigo-900" : "text-rose-700"}`}>
+                        R$ {leadStats.netBalance.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                      <span className="text-[9.5px] uppercase font-bold text-slate-500 block">Margem Operacional</span>
+                      <span className="text-base font-black text-slate-800 font-mono block mt-1">
+                        {leadStats.efficiency.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. COMPARATIVO MENSAL CHART & DATA TABLE */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-xs bg-indigo-600" />
+                      2. Gráfico do Comparativo Mensal Histórico
+                    </h3>
+                    <span className="text-[10px] text-slate-400 font-medium">
+                      Evolução mensal de receitas e despesas
+                    </span>
+                  </div>
+
+                  {/* Graphic Recharts for Print */}
+                  {monthlyData.length > 0 ? (
+                    <div className="h-64 w-full bg-white border border-slate-200 rounded-2xl p-3">
+                      {(() => {
+                        const hasReceitas = monthlyData.some(d => (d["Receitas (Inflow)"] || 0) > 0);
+                        const hasDespesas = monthlyData.some(d => (d["Despesas (Outflow)"] || 0) > 0);
+
+                        return (
+                          <RechartsResponsiveContainer width="100%" height="100%">
+                            <RechartsBarChart data={monthlyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                              <RechartsCartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                              <RechartsXAxis dataKey="label" stroke="#64748b" fontSize={9} tickLine={false} />
+                              <RechartsYAxis stroke="#64748b" fontSize={8} tickLine={false} tickFormatter={(val) => `R$ ${val >= 1000 ? (val / 1000).toFixed(0) + "k" : val}`} />
+                              {hasReceitas && (
+                                <RechartsBar name="Receitas" dataKey="Receitas (Inflow)" fill="#10b981" radius={[3, 3, 0, 0]} barSize={20} />
+                              )}
+                              {hasDespesas && (
+                                <RechartsBar name="Despesas" dataKey="Despesas (Outflow)" fill="#f43f5e" radius={[3, 3, 0, 0]} barSize={20} />
+                              )}
+                            </RechartsBarChart>
+                          </RechartsResponsiveContainer>
+                        );
+                      })()}
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-xs text-slate-400 italic border rounded-xl">Sem histórico mensal para exibir</div>
+                  )}
+
+                  {/* Tabular breakdown of monthly data */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse border border-slate-200 rounded-xl overflow-hidden">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700 font-bold uppercase text-[9.5px] border-b border-slate-200">
+                          <th className="p-2.5">Competência</th>
+                          <th className="p-2.5 text-right text-emerald-700">Receitas (+)</th>
+                          <th className="p-2.5 text-right text-rose-700">Despesas (-)</th>
+                          <th className="p-2.5 text-right text-indigo-900">Saldo Líquido</th>
+                          <th className="p-2.5 text-right">Margem</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                        {monthlyData.map((m) => {
+                          const inflow = m["Receitas (Inflow)"] || 0;
+                          const outflow = m["Despesas (Outflow)"] || 0;
+                          const net = inflow - outflow;
+                          const marg = inflow > 0 ? (net / inflow) * 100 : 0;
+
+                          return (
+                            <tr key={m.period} className="hover:bg-slate-50/50">
+                              <td className="p-2.5 font-bold font-sans text-slate-800">{m.fullLabel}</td>
+                              <td className="p-2.5 text-right text-emerald-600 font-bold">
+                                R$ {inflow.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+                              <td className="p-2.5 text-right text-rose-600 font-bold">
+                                R$ {outflow.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+                              <td className={`p-2.5 text-right font-black ${net >= 0 ? "text-indigo-900" : "text-rose-700"}`}>
+                                {net >= 0 ? "+" : ""}R$ {net.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+                              <td className="p-2.5 text-right font-sans font-bold text-slate-600">
+                                {marg.toFixed(1)}%
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 4. CATEGORIES BREAKDOWN WITH ZERO SUPPRESSION */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-xs bg-indigo-600" />
+                      3. Distribuição por Categorias
+                    </h3>
+                    <span className="text-[10px] text-slate-400 font-medium">
+                      Concentração de receitas e despesas por categoria
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    {/* Receitas Breakdown */}
+                    {categoryChartData.entradas.length > 0 && (
+                      <div className="border border-slate-200 rounded-2xl p-4 bg-white">
+                        <h4 className="font-extrabold text-xs text-emerald-700 uppercase tracking-wider mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                            Receitas ({categoryChartData.entradas.length})
+                          </span>
+                          <span className="font-mono text-[10px]">
+                            R$ {categoryChartData.entradas.reduce((s, e) => s + e.Total, 0).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                          </span>
+                        </h4>
+
+                        <div className="space-y-2">
+                          {categoryChartData.entradas.map((cat) => {
+                            const totalSum = categoryChartData.entradas.reduce((s, e) => s + e.Total, 0);
+                            const pct = totalSum > 0 ? ((cat.Total / totalSum) * 100).toFixed(1) : "0.0";
+                            return (
+                              <div key={cat.name} className="space-y-1">
+                                <div className="flex justify-between text-xs font-medium">
+                                  <span className="font-bold text-slate-700">{cat.name}</span>
+                                  <span className="font-mono font-bold text-emerald-600">
+                                    R$ {cat.Total.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} ({pct}%)
+                                  </span>
+                                </div>
+                                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                                  <div style={{ width: `${pct}%` }} className="bg-emerald-500 h-full" />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Despesas Breakdown */}
+                    {categoryChartData.saidas.length > 0 && (
+                      <div className="border border-slate-200 rounded-2xl p-4 bg-white">
+                        <h4 className="font-extrabold text-xs text-rose-700 uppercase tracking-wider mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-rose-500" />
+                            Despesas ({categoryChartData.saidas.length})
+                          </span>
+                          <span className="font-mono text-[10px]">
+                            R$ {categoryChartData.saidas.reduce((s, e) => s + e.Total, 0).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}
+                          </span>
+                        </h4>
+
+                        <div className="space-y-2">
+                          {categoryChartData.saidas.map((cat) => {
+                            const totalSum = categoryChartData.saidas.reduce((s, e) => s + e.Total, 0);
+                            const pct = totalSum > 0 ? ((cat.Total / totalSum) * 100).toFixed(1) : "0.0";
+                            return (
+                              <div key={cat.name} className="space-y-1">
+                                <div className="flex justify-between text-xs font-medium">
+                                  <span className="font-bold text-slate-700">{cat.name}</span>
+                                  <span className="font-mono font-bold text-rose-600">
+                                    R$ {cat.Total.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} ({pct}%)
+                                  </span>
+                                </div>
+                                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                                  <div style={{ width: `${pct}%` }} className="bg-rose-500 h-full" />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 5. REPORT FOOTER AND SIGNATURE */}
+                <div className="pt-8 border-t-2 border-slate-200 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-6">
+                  <div>
+                    <span className="font-bold text-slate-700 block">Sistema Controle de Caixa Inteligente</span>
+                    <span className="text-[10px]">Relatório gerado automaticamente através do painel de indicadores.</span>
+                  </div>
+
+                  <div className="text-center sm:text-right">
+                    <div className="w-48 border-b border-slate-400 mb-1" />
+                    <span className="text-[10px] uppercase font-bold text-slate-600">Assinatura / Responsável Financeiro</span>
+                  </div>
+                </div>
+
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

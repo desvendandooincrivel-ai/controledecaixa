@@ -39,6 +39,24 @@ interface RentalProperty {
   depositAmount?: number;
   depositStartDate?: string;
   depositInterestRate?: number;
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: RentalItemAdjustment[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
+}
+
+export interface RentalItemAdjustment {
+  id: string;
+  mode: "add" | "subtract";
+  amount: number;
+  description: string;
+  recurrence: "fixo" | "pontual";
+  targetPeriod?: string;
+  createdAt?: string;
 }
 
 interface RentalPaymentAdjustment {
@@ -92,8 +110,18 @@ const getLocalDateInputValue = (date = new Date()) => {
   return `${year}-${month}-${day}`;
 };
 
-const getRentalExpectedAmount = (rental: RentalProperty) => {
-  return rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+const getRentalExpectedAmount = (rental: RentalProperty, period?: string) => {
+  const base = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+  if (rental.adjustments && Array.isArray(rental.adjustments) && rental.adjustments.length > 0) {
+    const netAdj = rental.adjustments
+      .filter(a => a.recurrence === "fixo" || (!period || a.targetPeriod === period))
+      .reduce((sum, a) => a.mode === "subtract" ? sum - a.amount : sum + a.amount, 0);
+    return base + netAdj;
+  }
+  if (rental.adjustmentAmount && rental.adjustmentAmount > 0) {
+    return rental.adjustmentMode === "subtract" ? base - rental.adjustmentAmount : base + rental.adjustmentAmount;
+  }
+  return base;
 };
 
 const getPendingRentalCarryover = (rental: RentalProperty, currentPeriod: string) => {
@@ -204,23 +232,9 @@ export function RentalReportModal({
     const rateAdimplencia = totalCount > 0 ? (paidCount / totalCount) * 100 : 0;
 
     // Financial totals
-    const totalExpectedLiquid = relevantRentals.reduce((sum, r) => {
-      const gross = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount;
-      const net = gross - r.adminFeeAmount;
-      return sum + net;
-    }, 0);
-
-    const totalRealizedLiquid = paidList.reduce((sum, r) => {
-      const gross = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount;
-      const net = gross - r.adminFeeAmount;
-      return sum + net;
-    }, 0);
-
-    const totalPendingLiquid = pendingList.reduce((sum, r) => {
-      const gross = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount;
-      const net = gross - r.adminFeeAmount;
-      return sum + net;
-    }, 0);
+    const totalExpectedLiquid = relevantRentals.reduce((sum, r) => sum + getRentalExpectedAmount(r), 0);
+    const totalRealizedLiquid = paidList.reduce((sum, r) => sum + getRentalExpectedAmount(r), 0);
+    const totalPendingLiquid = pendingList.reduce((sum, r) => sum + getRentalExpectedAmount(r), 0);
 
     // Sum of admin fees
     const totalAdminFees = relevantRentals.reduce((sum, r) => sum + r.adminFeeAmount, 0);

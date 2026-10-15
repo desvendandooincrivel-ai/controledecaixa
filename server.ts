@@ -398,12 +398,21 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
       const simulate = req.query.simulate === "true";
       
       // Read current local package version
-      let currentVersion = "1.0.6";
+      let currentVersion = process.env.APP_VERSION || "1.0.8";
       try {
-        const pkgPath = path.join(process.cwd(), "package.json");
-        if (fs.existsSync(pkgPath)) {
-          const pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-          if (pkgData.version) currentVersion = pkgData.version;
+        const candidatePaths = [
+          path.join(process.cwd(), "package.json"),
+          path.join(__dirname, "package.json"),
+          path.join(__dirname, "..", "package.json"),
+        ];
+        for (const p of candidatePaths) {
+          if (fs.existsSync(p)) {
+            const pkgData = JSON.parse(fs.readFileSync(p, "utf-8"));
+            if (pkgData.version) {
+              currentVersion = pkgData.version;
+              break;
+            }
+          }
         }
       } catch (err) {
         console.warn("Could not read package.json version:", err);
@@ -413,13 +422,13 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
         res.json({
           hasUpdate: true,
           currentVersion,
-          latestVersion: "1.0.7",
-          releaseName: "Versão 1.0.7 - Atualização de Recursos & Notificações",
-          releaseNotes: "### 🚀 O que mudou nesta versão:\n- **Verificador de Atualizações Automático**: O sistema agora avisa você quando houver novas versões disponíveis no repositório caixaatt.\n- **Transparência de Mudanças**: Veja as notas de atualização completas antes de decidir se deseja atualizar ou adiar.\n- **Melhorias no Fluxo de Caixa**: Otimizações nos demonstrativos financeiros e relatórios.\n- **Maior Estabilidade**: Correções pontuais e melhorias de performance.",
+          latestVersion: "1.0.8",
+          releaseName: "Versão 1.0.8 - Base Limpa & Atualizador no App",
+          releaseNotes: "### 🚀 O que mudou na Versão 1.0.8:\n- **Base de Dados Limpa**: Remoção completa de registros de demonstração e limpeza automática.\n- **Atualizador no App**: Download integrado diretamente no aplicativo com barra de progresso em tempo real e reinicialização automática.\n- **Melhorias Gerais**: Correções no fluxo de caixa, aluguéis e maior estabilidade do sistema.",
           publishedAt: new Date().toISOString(),
           downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
-          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.7.exe",
-          installerSize: 89432000,
+          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.8.exe",
+          installerSize: 115000000,
           isSimulated: true,
           checkedAt: new Date().toISOString()
         });
@@ -428,57 +437,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
 
       const GITHUB_REPO = "desvendandooincrivel-ai/caixaatt";
       
-      // 1. First, check version.json or update.json directly in the caixaatt repository
-      const manifestCandidates = [
-        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/version.json`,
-        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/update.json`,
-        `https://raw.githubusercontent.com/${GITHUB_REPO}/main/latest.json`
-      ];
-
-      let manifest: any = null;
-      for (const manifestUrl of manifestCandidates) {
-        try {
-          const mRes = await fetch(manifestUrl, {
-            headers: { 
-              "User-Agent": "ControleDeCaixa-App",
-              "Cache-Control": "no-cache"
-            }
-          });
-          if (mRes.ok) {
-            manifest = await mRes.json();
-            break;
-          }
-        } catch (_) {}
-      }
-
-      // If remote manifest exists in caixaatt
-      if (manifest && manifest.version) {
-        const latestVersion = String(manifest.version).replace(/^v/i, "");
-        const hasUpdate = isNewerVersion(latestVersion, currentVersion);
-        const changelogText = Array.isArray(manifest.changelog)
-          ? manifest.changelog.map((item: string) => `- ${item}`).join("\n")
-          : (manifest.changelog || manifest.notes || "Atualizações e melhorias gerais.");
-
-        const fallbackDownloadUrl = manifest.downloadUrl || manifest.installerUrl || `https://github.com/${GITHUB_REPO}/raw/main/Controle-de-Caixa-Setup-${latestVersion}.exe`;
-
-        res.json({
-          hasUpdate,
-          currentVersion,
-          latestVersion,
-          releaseName: manifest.title || manifest.name || `Versão ${latestVersion}`,
-          releaseNotes: changelogText,
-          publishedAt: manifest.releaseDate || manifest.date || new Date().toISOString(),
-          downloadUrl: `https://github.com/${GITHUB_REPO}`,
-          installerUrl: fallbackDownloadUrl,
-          installerSize: manifest.size || null,
-          source: "caixaatt_manifest",
-          isSimulated: false,
-          checkedAt: new Date().toISOString()
-        });
-        return;
-      }
-
-      // 2. Next, check GitHub Releases of caixaatt
+      // 1. Check GitHub Releases of caixaatt (official release channel)
       const releasesUrl = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
       let remoteRelease: any = null;
       try {
@@ -496,7 +455,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
         console.warn("GitHub releases check failed:", fetchErr);
       }
 
-      // If GitHub release exists in caixaatt
+      // If a published GitHub release exists in caixaatt
       if (remoteRelease && remoteRelease.tag_name) {
         const latestVersion = remoteRelease.tag_name.replace(/^v/i, "");
         const hasUpdate = isNewerVersion(latestVersion, currentVersion);
@@ -528,7 +487,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
         return;
       }
 
-      // 3. No newer release or repo is pending initial upload
+      // 2. No release published yet or already at latest version
       res.json({
         hasUpdate: false,
         currentVersion,
@@ -583,7 +542,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
           percent: 0,
           transferred: 0,
           total: 115000000,
-          filePath: path.join(os.tmpdir(), `Controle-de-Caixa-Setup-${version || "1.0.7"}.exe`),
+          filePath: path.join(os.tmpdir(), `Controle-de-Caixa-Setup-${version || "1.0.8"}.exe`),
           error: null,
         };
         res.json({ message: "Download simulado iniciado." });

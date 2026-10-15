@@ -66,8 +66,9 @@ function startLocalServer() {
   process.env.NODE_ENV = "production";
   process.env.HOST = "127.0.0.1";
   process.env.PORT = APP_PORT;
+  process.env.APP_VERSION = app.getVersion();
 
-  writeLog(`Iniciando servidor local na porta ${APP_PORT}.`);
+  writeLog(`Iniciando servidor local na porta ${APP_PORT} (v${app.getVersion()}).`);
   require(path.join(app.getAppPath(), "dist", "server.cjs"));
 }
 

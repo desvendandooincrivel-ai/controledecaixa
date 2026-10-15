@@ -1,7 +1,7 @@
 {
   "name": "controle-de-caixa",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "productName": "Controle de Caixa",
   "main": "electron/main.cjs",
   "type": "module",

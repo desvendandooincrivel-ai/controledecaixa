@@ -1,12 +1,13 @@
 {
-  "version": "1.0.7",
+  "version": "1.0.8",
   "releaseDate": "2026-10-14",
-  "title": "Versão 1.0.7 - Atualizador Automático & Melhorias",
+  "title": "Versão 1.0.8 - Base Limpa & Atualizador no App",
   "changelog": [
-    "Sistema de busca por atualização automática integrado ao GitHub Releases (caixaatt)",
-    "Notificação interativa de nova versão com resumo completo de mudanças",
-    "Liberdade para o usuário decidir quando atualizar ou adiar",
-    "Otimizações de performance no fluxo de caixa e relatórios"
+    "Remoção completa dos dados de demonstração (base pronta para produção)",
+    "Atualizador integrado: download diretamente pelo aplicativo com barra de progresso em tempo real",
+    "Instalação e reinicialização com 1 clique diretamente pelo sistema",
+    "Melhorias no painel de conciliação de aluguéis e fluxo de caixa",
+    "Maior estabilidade e correções gerais"
   ],
   "downloadUrl": "https://github.com/desvendandooincrivel-ai/caixaatt/releases/latest"
 }

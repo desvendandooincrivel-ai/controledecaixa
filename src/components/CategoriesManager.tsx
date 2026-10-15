@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Plus, Trash2, Edit3, Check, X, Tag, CornerDownRight } from "lucide-react";
+import { Plus, Trash2, Edit3, Check, X, Tag, ArrowRightLeft } from "lucide-react";
+import { resolveCategoryColorHex } from "../utils/categoryColor";
 
 // Same interface as defined in App.tsx
 export interface Category {
@@ -14,6 +15,7 @@ interface CategoriesManagerProps {
   onCreate: (name: string, type: "entrada" | "saida", color: string) => any;
   onUpdate: (id: string, newName: string, newColor: string) => void;
   onDelete: (id: string) => void;
+  onOpenTransfer?: (sourceCatId?: string) => void;
 }
 
 // Available standard colors for user selection
@@ -33,25 +35,8 @@ const COLOR_OPTIONS = [
   { class: "bg-zinc-500", label: "Cinza", hex: "#71717a" },
 ];
 
-export const classToHex = (colorClass: string): string => {
-  if (colorClass.startsWith("#")) return colorClass;
-  const mapping: Record<string, string> = {
-    "bg-emerald-500": "#10b981",
-    "bg-cyan-555": "#06b6d4",
-    "bg-cyan-500": "#06b6d4",
-    "bg-indigo-500": "#6366f1",
-    "bg-sky-500": "#0ea5e9",
-    "bg-teal-500": "#14b8a6",
-    "bg-amber-500": "#f59e0b",
-    "bg-red-500": "#ef4444",
-    "bg-orange-500": "#f97316",
-    "bg-purple-600": "#a855f7",
-    "bg-pink-500": "#ec4899",
-    "bg-rose-500": "#f43f5e",
-    "bg-violet-500": "#8b5cf6",
-    "bg-zinc-500": "#71717a"
-  };
-  return mapping[colorClass] || colorClass || "#10b981";
+export const classToHex = (colorClass: string, name?: string, type?: "entrada" | "saida"): string => {
+  return resolveCategoryColorHex(colorClass, name, type || "saida");
 };
 
 export function CategoriesManager({
@@ -59,11 +44,12 @@ export function CategoriesManager({
   onCreate,
   onUpdate,
   onDelete,
+  onOpenTransfer,
 }: CategoriesManagerProps) {
   // Creator form state
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState<"entrada" | "saida">("entrada");
-  const [newColor, setNewColor] = useState("bg-emerald-500");
+  const [newColor, setNewColor] = useState("#10b981");
 
   // Editorial Inline states for existing categories
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -73,13 +59,13 @@ export function CategoriesManager({
   // Handler to change select type and set corresponding default color
   const handleTypeChange = (type: "entrada" | "saida") => {
     setNewType(type);
-    setNewColor(type === "entrada" ? "bg-emerald-500" : "bg-rose-500");
+    setNewColor(type === "entrada" ? "#10b981" : "#f43f5e");
   };
 
   const handleStartEdit = (cat: Category) => {
     setEditingId(cat.id);
     setEditNameField(cat.name);
-    setEditColorField(cat.color);
+    setEditColorField(resolveCategoryColorHex(cat.color, cat.name, cat.type));
   };
 
   const handleCancelEdit = () => {
@@ -93,7 +79,9 @@ export function CategoriesManager({
       alert("O nome da categoria não pode estar vazio.");
       return;
     }
-    onUpdate(id, editNameField.trim(), editColorField);
+    const cat = categories.find(c => c.id === id);
+    const cleanColor = resolveCategoryColorHex(editColorField, editNameField.trim(), cat?.type || "saida");
+    onUpdate(id, editNameField.trim(), cleanColor);
     setEditingId(null);
   };
 
@@ -103,11 +91,12 @@ export function CategoriesManager({
       alert("Por favor, digite o nome da categoria.");
       return;
     }
-    const created = onCreate(newName, newType, newColor);
+    const cleanColor = resolveCategoryColorHex(newColor, newName.trim(), newType);
+    const created = onCreate(newName.trim(), newType, cleanColor);
     if (created) {
       setNewName("");
       // Reset default select color representation when switching types
-      setNewColor(newType === "entrada" ? "bg-emerald-500" : "bg-rose-500");
+      setNewColor(newType === "entrada" ? "#10b981" : "#f43f5e");
     }
   };
 
@@ -213,6 +202,18 @@ export function CategoriesManager({
             <span>Adicionar Categoria</span>
           </button>
 
+          {/* Bulk Transfer Shortcut Button */}
+          {onOpenTransfer && (
+            <button
+              type="button"
+              onClick={() => onOpenTransfer()}
+              className="w-full mt-2 bg-white hover:bg-indigo-50/60 border border-indigo-200 text-indigo-700 font-bold py-2 px-3 rounded-xl shadow-3xs transition flex items-center justify-center gap-1.5 cursor-pointer text-xs"
+            >
+              <ArrowRightLeft size={13} />
+              <span>Transferência em Massa de Registros</span>
+            </button>
+          )}
+
         </form>
       </div>
 
@@ -248,7 +249,8 @@ export function CategoriesManager({
                             type="text"
                             value={editNameField}
                             onChange={(e) => setEditNameField(e.target.value)}
-                            className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 flex-1 outline-none"
+                            disabled={cat.id === "cat-in-aluguéis-ativos" || cat.id === "cat-in-alugueis-ativos" || cat.name.toLowerCase() === "aluguéis ativos"}
+                            className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 flex-1 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                             maxLength={30}
                           />
                           <button
@@ -294,27 +296,46 @@ export function CategoriesManager({
                       <div className="flex items-center justify-between">
                         <span className="flex items-center gap-2.5">
                           <span 
-                            className={`h-2.5 w-2.5 rounded-full shadow-3xs flex-shrink-0 ${!cat.color.startsWith("#") ? cat.color : ""}`}
-                            style={cat.color.startsWith("#") ? { backgroundColor: cat.color } : undefined}
+                            className="h-2.5 w-2.5 rounded-full shadow-3xs flex-shrink-0 border border-black/10"
+                            style={{ backgroundColor: resolveCategoryColorHex(cat.color, cat.name, cat.type) }}
                           ></span>
-                          <span className="text-xs font-bold text-slate-700">{cat.name}</span>
+                          <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                            {cat.name}
+                            {(cat.id === "cat-in-aluguéis-ativos" || cat.id === "cat-in-alugueis-ativos" || cat.name.toLowerCase() === "aluguéis ativos") && (
+                              <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 bg-sky-100 text-sky-700 rounded-md tracking-wider">
+                                Fixa Oficial
+                              </span>
+                            )}
+                          </span>
                         </span>
                         
                         <div className="flex items-center gap-1">
+                          {onOpenTransfer && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenTransfer(cat.id)}
+                              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/50 rounded-lg cursor-pointer transition"
+                              title="Transferir lançamentos desta categoria"
+                            >
+                              <ArrowRightLeft size={12} />
+                            </button>
+                          )}
                           <button
                             onClick={() => handleStartEdit(cat)}
                             className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/50 rounded-lg cursor-pointer transition"
-                            title="Editar"
+                            title="Editar Cor"
                           >
                             <Edit3 size={12} />
                           </button>
-                          <button
-                            onClick={() => onDelete(cat.id)}
-                            className="p-1.5 text-slate-400 hover:text-rose-550 hover:bg-rose-50/50 rounded-lg cursor-pointer transition"
-                            title="Descartar"
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          {!(cat.id === "cat-in-aluguéis-ativos" || cat.id === "cat-in-alugueis-ativos" || cat.name.toLowerCase() === "aluguéis ativos") && (
+                            <button
+                              onClick={() => onDelete(cat.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-550 hover:bg-rose-50/50 rounded-lg cursor-pointer transition"
+                              title="Excluir Categoria"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -399,13 +420,23 @@ export function CategoriesManager({
                       <div className="flex items-center justify-between">
                         <span className="flex items-center gap-2.5 font-semibold text-slate-700">
                           <span 
-                            className={`h-2.5 w-2.5 rounded-full shadow-3xs flex-shrink-0 ${!cat.color.startsWith("#") ? cat.color : ""}`}
-                            style={cat.color.startsWith("#") ? { backgroundColor: cat.color } : undefined}
+                            className="h-2.5 w-2.5 rounded-full shadow-3xs flex-shrink-0 border border-black/10"
+                            style={{ backgroundColor: resolveCategoryColorHex(cat.color, cat.name, cat.type) }}
                           ></span>
                           <span className="text-xs font-bold text-slate-700">{cat.name}</span>
                         </span>
                         
                         <div className="flex items-center gap-1">
+                          {onOpenTransfer && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenTransfer(cat.id)}
+                              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/50 rounded-lg cursor-pointer transition"
+                              title="Transferir lançamentos desta categoria"
+                            >
+                              <ArrowRightLeft size={12} />
+                            </button>
+                          )}
                           <button
                             onClick={() => handleStartEdit(cat)}
                             className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/50 rounded-lg cursor-pointer transition"
@@ -416,7 +447,7 @@ export function CategoriesManager({
                           <button
                             onClick={() => onDelete(cat.id)}
                             className="p-1.5 text-slate-400 hover:text-rose-550 hover:bg-rose-50/50 rounded-lg cursor-pointer transition"
-                            title="Descartar"
+                            title="Excluir Categoria"
                           >
                             <Trash2 size={12} />
                           </button>

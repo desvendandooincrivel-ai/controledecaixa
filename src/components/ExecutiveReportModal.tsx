@@ -47,6 +47,14 @@ interface RentalProperty {
   depositAmount?: number;
   depositStartDate?: string;
   depositInterestRate?: number;
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: any[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
 }
 
 interface ExecutiveReportModalProps {
@@ -996,7 +1004,11 @@ export function ExecutiveReportModal({
                           reportData.rentals.map(r => {
                             const thisMonthKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
                             const isPaid = r.paidPeriods.includes(thisMonthKey);
-                            const totalLiq = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount;
+                            const baseLiq = r.rentAmount + r.waterAmount + r.iptuAmount + r.garbageAmount + r.lightAmount + r.fineAmount - r.adminFeeAmount;
+                            const netAdj = r.adjustments && Array.isArray(r.adjustments) && r.adjustments.length > 0
+                              ? r.adjustments.filter((a: any) => a.recurrence === "fixo" || a.targetPeriod === thisMonthKey).reduce((sum: number, a: any) => a.mode === "subtract" ? sum - a.amount : sum + a.amount, 0)
+                              : (r.adjustmentAmount && r.adjustmentAmount > 0 ? (r.adjustmentMode === "subtract" ? -r.adjustmentAmount : r.adjustmentAmount) : 0);
+                            const totalLiq = baseLiq + netAdj;
 
                             return (
                               <tr key={r.id} className="hover:bg-slate-50/40">

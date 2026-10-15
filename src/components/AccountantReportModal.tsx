@@ -72,6 +72,24 @@ interface RentalProperty {
   depositAmount?: number;
   depositStartDate?: string;
   depositInterestRate?: number;
+  adjustmentMode?: "add" | "subtract";
+  adjustmentAmount?: number;
+  adjustmentReason?: string;
+  adjustments?: RentalItemAdjustment[];
+  guaranteeType?: "caucao" | "fiador" | "nenhuma";
+  guarantorName?: string;
+  guarantorPhone?: string;
+  guarantorCpf?: string;
+}
+
+export interface RentalItemAdjustment {
+  id: string;
+  mode: "add" | "subtract";
+  amount: number;
+  description: string;
+  recurrence: "fixo" | "pontual";
+  targetPeriod?: string;
+  createdAt?: string;
 }
 
 interface Category {
@@ -151,8 +169,18 @@ const formatPeriod = (period: string) => {
   return `${monthName}/${year}`;
 };
 
-const getRentalExpectedAmount = (rental: RentalProperty) => {
-  return rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+const getRentalExpectedAmount = (rental: RentalProperty, period?: string) => {
+  const base = rental.rentAmount + rental.waterAmount + rental.iptuAmount + rental.garbageAmount + rental.lightAmount + rental.fineAmount - rental.adminFeeAmount;
+  if (rental.adjustments && Array.isArray(rental.adjustments) && rental.adjustments.length > 0) {
+    const netAdj = rental.adjustments
+      .filter(a => a.recurrence === "fixo" || (!period || a.targetPeriod === period))
+      .reduce((sum, a) => a.mode === "subtract" ? sum - a.amount : sum + a.amount, 0);
+    return base + netAdj;
+  }
+  if (rental.adjustmentAmount && rental.adjustmentAmount > 0) {
+    return rental.adjustmentMode === "subtract" ? base - rental.adjustmentAmount : base + rental.adjustmentAmount;
+  }
+  return base;
 };
 
 const getPeriodKeyFromDate = (date: string) => date.slice(0, 7);
