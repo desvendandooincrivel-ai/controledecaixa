@@ -56,6 +56,7 @@ import { AccountantReportModal } from "./components/AccountantReportModal";
 import { DepositDetailModal, calculateMonthsDifference } from "./components/DepositDetailModal";
 import { CreditCardsManager, CreditCard as CreditCardData, PaymentMethod } from "./components/CreditCardsManager";
 import { AppUpdateModal, AppUpdateInfo } from "./components/AppUpdateModal";
+import { getCreditCardCycleForPurchase } from "./utils/creditCardCycle";
 
 // Interfaces
 interface Caixa {
@@ -70,6 +71,7 @@ interface Transaction {
   id: string;
   caixaId: string;
   date: string; // YYYY-MM-DD
+  purchaseDate?: string; // Data real da compra quando no cartão
   description: string;
   amount: number;
   type: "entrada" | "saida";
@@ -78,6 +80,10 @@ interface Transaction {
   cardId?: string;
   fixedTemplateId?: string;
   installments?: { current: number; total: number };
+  invoicePeriod?: string; // "YYYY-MM" competência da fatura
+  isCardInvoicePayment?: boolean; // Se é a baixa/quitação da fatura no caixa
+  invoicePaid?: boolean; // Se a compra já teve a fatura quitada
+  invoicePaymentTxId?: string; // ID da transação da fatura paga
 }
 
 interface Category {
@@ -825,6 +831,39 @@ export default function App() {
   const activeCards = useMemo(() => {
     return creditCards.filter(c => !c.caixaId || c.caixaId === activeCaixaId);
   }, [creditCards, activeCaixaId]);
+
+  // Retroactive migration for credit card transactions (populate invoicePeriod / purchaseDate / rollover dates)
+  useEffect(() => {
+    if (localStorage.getItem("caixa_credit_card_cycle_v110") !== "true") {
+      localStorage.setItem("caixa_credit_card_cycle_v110", "true");
+      setTransactions(prev => {
+        let changed = false;
+        const updated = prev.map(t => {
+          if (t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment) {
+            const card = creditCards.find(c => c.id === t.cardId) || creditCards[0];
+            const closingDay = card?.closingDay || 15;
+            const dueDay = card?.dueDay || 25;
+            const purchaseDate = t.purchaseDate || t.date;
+            const instIdx = t.installments ? (t.installments.current - 1) : 0;
+            const cycle = getCreditCardCycleForPurchase(purchaseDate, closingDay, dueDay, instIdx);
+
+            if (!t.invoicePeriod || !t.purchaseDate || (t.date !== cycle.dueDate && t.date === purchaseDate && cycle.isNextMonth)) {
+              changed = true;
+              return {
+                ...t,
+                purchaseDate: purchaseDate,
+                invoicePeriod: cycle.invoicePeriod,
+                date: cycle.dueDate,
+                invoicePaid: t.invoicePaid ?? false
+              };
+            }
+          }
+          return t;
+        });
+        return changed ? updated : prev;
+      });
+    }
+  }, [creditCards]);
 
   // Modal for Confirming/Adjusting Fixed Expense launch (cents adjustment, date, payment method)
   const [confirmingFixedTpl, setConfirmingFixedTpl] = useState<FixedTemplate | null>(null);
@@ -1834,7 +1873,11 @@ export default function App() {
         if (t.type === "entrada") {
           accumulated += t.amount;
         } else {
-          accumulated -= t.amount;
+          // Apenas saídas reais do caixa abatem o saldo físico acumulado.
+          // Compras avulsas no cartão de crédito (a prazo) são quitadas pela transação da fatura.
+          if (!(t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment)) {
+            accumulated -= t.amount;
+          }
         }
       }
     });
@@ -1846,16 +1889,25 @@ export default function App() {
   const totals = useMemo(() => {
     let entrada = 0;
     let saida = 0;
+    let faturaCartaoPendente = 0;
+
     filteredTransactions.forEach(t => {
       if (t.type === "entrada") {
         entrada += t.amount;
       } else {
-        saida += t.amount;
+        // Se for compra no cartão de crédito avulsa (a prazo), o dinheiro não sai do caixa na hora.
+        // O que debita o caixa é o lançamento da fatura paga (isCardInvoicePayment)!
+        if (t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment) {
+          faturaCartaoPendente += t.amount;
+        } else {
+          saida += t.amount;
+        }
       }
     });
     return {
       entrada,
       saida,
+      faturaCartaoPendente,
       saldo: entrada - saida
     };
   }, [filteredTransactions]);
@@ -1936,9 +1988,24 @@ export default function App() {
     const baseDate = new Date(formDate + "T12:00:00");
     const createdTxs: Transaction[] = [];
 
+    const selectedCard = formPaymentMethod === "cartao_credito" && formCardId
+      ? creditCards.find(c => c.id === formCardId)
+      : undefined;
+
     for (let i = 1; i <= numInstallments; i++) {
-      const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + (i - 1), baseDate.getDate());
-      const dateStr = d.toISOString().split("T")[0];
+      let dateStr = "";
+      let invoicePeriod: string | undefined = undefined;
+
+      if (selectedCard) {
+        // Calcula a competência da fatura e o vencimento respeitando o dia de fechamento (virada) do cartão
+        const cycle = getCreditCardCycleForPurchase(formDate, selectedCard.closingDay, selectedCard.dueDay, i);
+        dateStr = cycle.dueDate; // Cai na data de vencimento da fatura correspondente (ex: 2026-11-25)
+        invoicePeriod = cycle.invoicePeriod; // ex: "2026-11"
+      } else {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + (i - 1), baseDate.getDate());
+        dateStr = d.toISOString().split("T")[0];
+      }
+
       const desc = numInstallments > 1
         ? `${formDescription.trim()} (${i}/${numInstallments})`
         : formDescription.trim();
@@ -1947,13 +2014,15 @@ export default function App() {
         id: "tx-" + Date.now() + "-" + i + "-" + Math.random().toString(36).substr(2, 4),
         caixaId: activeCaixaId,
         date: dateStr,
+        purchaseDate: formDate,
         description: desc,
         amount: installmentAmount,
         type,
         category: safeCategory,
         paymentMethod: formPaymentMethod,
         cardId: formPaymentMethod === "cartao_credito" ? formCardId : undefined,
-        installments: numInstallments > 1 ? { current: i, total: numInstallments } : undefined
+        installments: numInstallments > 1 ? { current: i, total: numInstallments } : undefined,
+        invoicePeriod
       });
     }
 
@@ -2036,7 +2105,7 @@ export default function App() {
 
   const startEditTransaction = (t: Transaction) => {
     setEditingTransactionId(t.id);
-    setEditDate(t.date);
+    setEditDate(t.purchaseDate || t.date);
     setEditDescription(t.description);
     setEditAmountStr(String(t.amount).replace(".", ","));
     setEditCategory(t.category);
@@ -2066,9 +2135,26 @@ export default function App() {
 
     setTransactions(prev => prev.map(t => {
       if (t.id === editingTransactionId) {
+        let finalDate = editDate;
+        let invoicePeriod = t.invoicePeriod;
+        let purchaseDate = editDate;
+
+        if (editPaymentMethod === "cartao_credito" && !t.isCardInvoicePayment) {
+          const card = creditCards.find(c => c.id === editCardId) || creditCards[0];
+          if (card) {
+            const instIdx = t.installments ? (t.installments.current - 1) : 0;
+            const cycle = getCreditCardCycleForPurchase(editDate, card.closingDay, card.dueDay, instIdx);
+            finalDate = cycle.dueDate;
+            invoicePeriod = cycle.invoicePeriod;
+            purchaseDate = editDate;
+          }
+        }
+
         return {
           ...t,
-          date: editDate,
+          date: finalDate,
+          purchaseDate: purchaseDate,
+          invoicePeriod: invoicePeriod,
           description: editDescription.trim(),
           amount: rawVal,
           category: editCategory,
@@ -2243,13 +2329,29 @@ export default function App() {
     const targetMonth = confirmFixedDate.split("-")[1];
     const existingTx = getPostedTxForFixed(confirmingFixedTpl, targetYear, targetMonth);
 
+    let postDate = confirmFixedDate;
+    let invoicePeriod: string | undefined = undefined;
+    let purchaseDate: string | undefined = undefined;
+
+    if (confirmFixedPaymentMethod === "cartao_credito") {
+      const card = creditCards.find(c => c.id === confirmFixedCardId) || creditCards[0];
+      if (card) {
+        const cycle = getCreditCardCycleForPurchase(confirmFixedDate, card.closingDay, card.dueDay);
+        postDate = cycle.dueDate;
+        invoicePeriod = cycle.invoicePeriod;
+        purchaseDate = confirmFixedDate;
+      }
+    }
+
     // Se já existia transação e usuário optou por atualizar a existente
     if (existingTx && confirmFixedUpdateExistingTx) {
       setTransactions(prev => prev.map(t => {
         if (t.id === existingTx.id) {
           return {
             ...t,
-            date: confirmFixedDate,
+            date: postDate,
+            purchaseDate: purchaseDate || confirmFixedDate,
+            invoicePeriod: invoicePeriod,
             amount: rawVal,
             paymentMethod: confirmFixedPaymentMethod,
             cardId: confirmFixedPaymentMethod === "cartao_credito" ? confirmFixedCardId : undefined,
@@ -2268,7 +2370,10 @@ export default function App() {
       const newTx: Transaction = {
         id: "tx-posted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
         caixaId: confirmingFixedTpl.caixaId || activeCaixaId,
-        date: confirmFixedDate,
+        date: postDate,
+        purchaseDate: purchaseDate || confirmFixedDate,
+        invoicePeriod: invoicePeriod,
+        invoicePaid: false,
         description: `[Fixo] ${confirmingFixedTpl.description}`,
         amount: rawVal,
         type: confirmingFixedTpl.type,
@@ -2389,31 +2494,54 @@ export default function App() {
     }
   };
 
-  const handlePostCardInvoiceToLedger = (card: CreditCardData, amount: number, dueDate: string, periodLabel: string) => {
+  const handlePostCardInvoiceToLedger = (
+    card: CreditCardData,
+    amount: number,
+    paymentDate: string,
+    periodLabel: string,
+    paymentMethod: PaymentMethod = "pix",
+    invoicePeriod?: string
+  ) => {
     if (amount <= 0) {
       alert("O valor da fatura está zerado.");
       return;
     }
 
+    const invoiceTxId = "tx-invoice-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4);
+    const effectiveDate = paymentDate || getLocalDateInputValue();
+
     const newTx: Transaction = {
-      id: "tx-invoice-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+      id: invoiceTxId,
       caixaId: activeCaixaId,
-      date: dueDate,
-      description: `[Fatura] Cartão ${card.name} (${periodLabel})`,
+      date: effectiveDate,
+      description: `[Fatura Paga] Cartão ${card.name} (${periodLabel})`,
       amount: amount,
       type: "saida",
       category: resolveCategoryForType("Cartão de Crédito", "saida") || "Outras Despesas",
-      paymentMethod: "cartao_credito",
-      cardId: card.id
+      paymentMethod: paymentMethod || "pix",
+      cardId: card.id,
+      isCardInvoicePayment: true,
+      invoicePeriod: invoicePeriod
     };
 
-    setTransactions(prev => [newTx, ...prev]);
+    setTransactions(prev => {
+      const updated = prev.map(t => {
+        if (t.cardId === card.id && t.type === "saida" && !t.isCardInvoicePayment) {
+          if (invoicePeriod && t.invoicePeriod === invoicePeriod) {
+            return { ...t, invoicePaid: true, invoicePaymentTxId: invoiceTxId };
+          }
+        }
+        return t;
+      });
+      return [newTx, ...updated];
+    });
+
     addLogEntry(
       "transacao",
-      `Fatura do cartão "${card.name}" lançada no extrato para vencimento em ${formatDateBRL(dueDate)} no valor de ${amount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}.`,
+      `Pagamento de fatura do cartão "${card.name}" (${periodLabel}) registrado no caixa em ${formatDateBRL(effectiveDate)} no valor de ${amount.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} via ${paymentMethod.toUpperCase()}.`,
       amount
     );
-    alert(`Sucesso! Fatura do cartão "${card.name}" de R$ ${amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} lançada no extrato para vencimento em ${formatDateBRL(dueDate)}.`);
+    alert(`Sucesso! Pagamento da fatura do cartão "${card.name}" de R$ ${amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} lançado no extrato.`);
   };
 
   // Helper date period displayer Ex: "Janeiro de 2026"
@@ -5232,8 +5360,13 @@ export default function App() {
                 R$ {totals.saida.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
               </h3>
             </div>
-            <div className="text-[11px] text-rose-600 font-semibold mt-4">
-              Despesas e retiradas efetuadas
+            <div className="text-[11px] text-rose-600 font-semibold mt-4 flex items-center justify-between flex-wrap gap-1">
+              <span>Despesas e saídas do caixa</span>
+              {totals.faturaCartaoPendente > 0 && (
+                <span className="text-[10px] text-purple-700 bg-purple-100/90 border border-purple-200 px-2 py-0.5 rounded-full font-bold" title="Compras no cartão de crédito a serem quitadas via pagamento de fatura">
+                  💳 Fatura aberta: R$ {totals.faturaCartaoPendente.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                </span>
+              )}
             </div>
           </div>
 
@@ -5491,6 +5624,32 @@ export default function App() {
                       ))}
                     </select>
                   </div>
+
+                  {/* Banner informativo da virada do cartão */}
+                  {formCardId && (() => {
+                    const card = activeCards.find(c => c.id === formCardId);
+                    if (!card) return null;
+                    const cycle = getCreditCardCycleForPurchase(formDate, card.closingDay, card.dueDay);
+                    return (
+                      <div className={`col-span-1 sm:col-span-2 p-2.5 rounded-xl border text-xs flex items-center gap-2.5 ${
+                        cycle.isRolledToNextMonth
+                          ? "bg-purple-50 border-purple-200 text-purple-900"
+                          : "bg-indigo-50 border-indigo-200 text-indigo-900"
+                      }`}>
+                        <span className="text-base">{cycle.isRolledToNextMonth ? "⚡" : "📅"}</span>
+                        <div>
+                          <p className="font-bold leading-tight">
+                            {cycle.isRolledToNextMonth
+                              ? `O cartão virou dia ${card.closingDay}! Esta compra entrará na Fatura de ${cycle.invoiceLabel}.`
+                              : `Esta compra entrará na Fatura de ${cycle.invoiceLabel} (fecha dia ${card.closingDay}).`}
+                          </p>
+                          <p className="text-[10px] opacity-80 mt-0.5">
+                            Vencimento da fatura: <strong>{cycle.dueDate.split("-").reverse().join("/")}</strong>. As compras no cartão são agrupadas na fatura e debitam do caixa na quitação.
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -6119,9 +6278,16 @@ export default function App() {
                                 className="bg-white border border-slate-300 rounded px-2 py-1 text-xs w-28"
                               />
                             ) : (
-                              <span className="font-mono text-slate-500 font-medium">
-                                {formatDateBRL(t.date)}
-                              </span>
+                              <div>
+                                <span className="font-mono text-slate-500 font-medium">
+                                  {formatDateBRL(t.date)}
+                                </span>
+                                {t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment && t.purchaseDate && t.purchaseDate !== t.date && (
+                                  <div className="text-[10px] text-purple-600 font-medium" title={`Compra efetuada em ${formatDateBRL(t.purchaseDate)} (Vencimento da Fatura em ${formatDateBRL(t.date)})`}>
+                                    Compra: {formatDateBRL(t.purchaseDate)}
+                                  </div>
+                                )}
+                              </div>
                             )}
                           </td>
 
@@ -6189,11 +6355,32 @@ export default function App() {
                                           {t.cardId && creditCards.find(c => c.id === t.cardId) && (
                                             <span className="font-normal opacity-90">({creditCards.find(c => c.id === t.cardId)?.name})</span>
                                           )}
+                                          {t.invoicePeriod && (
+                                            <span className="ml-1 text-[9px] font-mono font-semibold bg-purple-100/90 text-purple-800 px-1.5 py-0.2 rounded border border-purple-200">
+                                              Fatura {t.invoicePeriod.split('-')[1]}/{t.invoicePeriod.split('-')[0]}
+                                            </span>
+                                          )}
                                         </>
                                       )}
                                       {t.paymentMethod === "cartao_debito" && "💳 Débito"}
                                       {t.paymentMethod === "boleto" && "📄 Boleto"}
                                       {t.paymentMethod === "outros" && "🔄 Outros"}
+                                    </span>
+                                  )}
+                                  {t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment && (
+                                    t.invoicePaid ? (
+                                      <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded">
+                                        ✓ Fatura Quitada
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.2 rounded">
+                                        ⏳ Fatura Aberta
+                                      </span>
+                                    )
+                                  )}
+                                  {t.isCardInvoicePayment && (
+                                    <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.2 rounded">
+                                      📑 Baixa de Fatura ({t.invoicePeriod ? `${t.invoicePeriod.split('-')[1]}/${t.invoicePeriod.split('-')[0]}` : ''})
                                     </span>
                                   )}
                                   {t.installments && (
@@ -6263,9 +6450,20 @@ export default function App() {
                               />
                             ) : (
                               t.type === "saida" ? (
-                                <span className="text-rose-600 font-mono text-sm">
-                                  - R$ {t.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
-                                </span>
+                                t.paymentMethod === "cartao_credito" && !t.isCardInvoicePayment ? (
+                                  <div className="flex flex-col items-end">
+                                    <span className="text-purple-600 font-mono text-sm font-semibold">
+                                      - R$ {t.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                                    </span>
+                                    <span className="text-[10px] text-purple-500 font-sans font-medium">
+                                      (fatura cartão)
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-rose-600 font-mono text-sm">
+                                    - R$ {t.amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                                  </span>
+                                )
                               ) : (
                                 <span className="text-slate-300 font-mono text-sm">-</span>
                               )

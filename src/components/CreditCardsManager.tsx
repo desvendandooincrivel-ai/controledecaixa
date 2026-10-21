@@ -13,8 +13,12 @@ import {
   Receipt,
   X,
   Sparkles,
-  Info
+  Info,
+  Check,
+  Clock,
+  Layers
 } from "lucide-react";
+import { getCreditCardCycleForPurchase } from "../utils/creditCardCycle";
 
 export interface CreditCard {
   id: string;
@@ -32,6 +36,7 @@ export interface Transaction {
   id: string;
   caixaId: string;
   date: string;
+  purchaseDate?: string;
   description: string;
   amount: number;
   type: "entrada" | "saida";
@@ -39,6 +44,10 @@ export interface Transaction {
   paymentMethod?: PaymentMethod;
   cardId?: string;
   installments?: { current: number; total: number };
+  invoicePeriod?: string;
+  isCardInvoicePayment?: boolean;
+  invoicePaid?: boolean;
+  invoicePaymentTxId?: string;
 }
 
 interface CreditCardsManagerProps {
@@ -50,10 +59,17 @@ interface CreditCardsManagerProps {
   filterMonth: string;
   filterYear: string;
   monthsList: { value: string; label: string }[];
-  onPostInvoiceToLedger: (card: CreditCard, amount: number, dueDate: string, periodLabel: string) => void;
+  onPostInvoiceToLedger: (
+    card: CreditCard,
+    amount: number,
+    paymentDate: string,
+    periodLabel: string,
+    paymentMethod?: PaymentMethod,
+    invoicePeriod?: string
+  ) => void;
 }
 
-const PRESET_COLORS = [
+export const PRESET_COLORS = [
   { name: "Roxo Nubank", bg: "bg-gradient-to-br from-purple-700 to-purple-900", border: "border-purple-500", text: "text-purple-300", hex: "#7e22ce" },
   { name: "Azul Marinho", bg: "bg-gradient-to-br from-blue-700 to-indigo-950", border: "border-blue-500", text: "text-blue-300", hex: "#1d4ed8" },
   { name: "Verde Esmeralda", bg: "bg-gradient-to-br from-emerald-700 to-teal-950", border: "border-emerald-500", text: "text-emerald-300", hex: "#047857" },
@@ -77,30 +93,44 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCard, setEditingCard] = useState<CreditCard | null>(null);
 
-  // Form states
+  // Form states for create / edit card
   const [formName, setFormName] = useState("");
-  const [formClosingDay, setFormClosingDay] = useState<number>(25);
-  const [formDueDay, setFormDueDay] = useState<number>(5);
+  const [formClosingDay, setFormClosingDay] = useState<number>(15);
+  const [formDueDay, setFormDueDay] = useState<number>(25);
   const [formLimitStr, setFormLimitStr] = useState("");
   const [formColor, setFormColor] = useState(PRESET_COLORS[0].hex);
 
   // Selected card for detailed invoice inspection
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
 
-  const activeYearNum = filterYear !== "todos" ? parseInt(filterYear) : new Date().getFullYear();
-  const activeMonthNum = filterMonth !== "todos" ? parseInt(filterMonth) : new Date().getMonth() + 1;
+  // Active invoice tab per card: "current" (fatura do mês) ou "next" (próxima fatura pós-virada)
+  const [cardInvoiceTab, setCardInvoiceTab] = useState<{ [cardId: string]: "current" | "next" }>({});
+
+  // Settle invoice modal state
+  const [settlingModal, setSettlingModal] = useState<{
+    card: CreditCard;
+    period: string;
+    periodLabel: string;
+    totalAmount: number;
+    amountInput: string;
+    paymentDate: string;
+    paymentMethod: PaymentMethod;
+  } | null>(null);
+
+  const activeYearNum = filterYear !== "todos" ? parseInt(filterYear, 10) : new Date().getFullYear();
+  const activeMonthNum = filterMonth !== "todos" ? parseInt(filterMonth, 10) : new Date().getMonth() + 1;
   const activeMonthStr = String(activeMonthNum).padStart(2, "0");
 
   const currentMonthLabel = useMemo(() => {
-    const found = monthsList.find(m => parseInt(m.value) === activeMonthNum);
+    const found = monthsList.find(m => parseInt(m.value, 10) === activeMonthNum);
     return found ? `${found.label} de ${activeYearNum}` : `${activeMonthStr}/${activeYearNum}`;
   }, [monthsList, activeMonthNum, activeYearNum, activeMonthStr]);
 
   const openNewCardModal = () => {
     setEditingCard(null);
     setFormName("");
-    setFormClosingDay(25);
-    setFormDueDay(5);
+    setFormClosingDay(15);
+    setFormDueDay(25);
     setFormLimitStr("");
     setFormColor(PRESET_COLORS[0].hex);
     setIsModalOpen(true);
@@ -144,73 +174,177 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
     setIsModalOpen(false);
   };
 
-  // Helper: check if a transaction date falls into the card invoice for activeMonth/activeYear
-  // Rule for invoice of activeMonth/activeYear:
-  // If card closes on day C:
-  // Purchases from day (C + 1) of previous month to day C of current month belong to current month's invoice!
-  // Purchases AFTER day C roll into the next month's invoice!
-  const getCardInvoiceTransactions = (card: CreditCard) => {
+  /**
+   * Calcula as faturas do cartão:
+   * 1. Fatura da competência selecionada (ex: Outubro/2026)
+   * 2. Próxima fatura em aberto pós-virada (ex: Novembro/2026)
+   */
+  const getCardInvoicesData = (card: CreditCard) => {
     const cDay = card.closingDay;
+    const dDay = card.dueDay;
 
-    // Previous month calculation
+    // --- 1. FATURA ATUAL (Competência do Mês Selecionado) ---
+    const curPeriod = `${activeYearNum}-${activeMonthStr}`;
     let prevYear = activeYearNum;
     let prevMonth = activeMonthNum - 1;
     if (prevMonth === 0) {
       prevMonth = 12;
       prevYear -= 1;
     }
-
-    // Start date (inclusive): previous month day (cDay + 1)
     const maxDaysPrev = new Date(prevYear, prevMonth, 0).getDate();
     const actualStartDay = Math.min(cDay + 1, maxDaysPrev);
-    const startDateStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}-${String(actualStartDay).padStart(2, "0")}`;
+    const curCycleStartDate = `${prevYear}-${String(prevMonth).padStart(2, "0")}-${String(actualStartDay).padStart(2, "0")}`;
 
-    // End date (inclusive): current month day cDay
     const maxDaysCur = new Date(activeYearNum, activeMonthNum, 0).getDate();
     const actualEndDay = Math.min(cDay, maxDaysCur);
-    const endDateStr = `${activeYearNum}-${activeMonthStr}-${String(actualEndDay).padStart(2, "0")}`;
+    const curCycleEndDate = `${activeYearNum}-${activeMonthStr}-${String(actualEndDay).padStart(2, "0")}`;
 
-    // Filter transactions linked to this card
-    const cardTxs = transactions.filter(t => {
-      if (t.type !== "saida") return false;
+    const maxDaysDue = new Date(activeYearNum, activeMonthNum, 0).getDate();
+    const actualDueDay = Math.min(dDay, maxDaysDue);
+    const curDueDateStr = `${activeYearNum}-${activeMonthStr}-${String(actualDueDay).padStart(2, "0")}`;
+    const curCycleRangeStr = `${String(actualStartDay).padStart(2, "0")}/${String(prevMonth).padStart(2, "0")} até ${String(actualEndDay).padStart(2, "0")}/${activeMonthStr}`;
+
+    // --- 2. PRÓXIMA FATURA (Competência Seguinte / Pós-Virada) ---
+    let nextYear = activeYearNum;
+    let nextMonth = activeMonthNum + 1;
+    if (nextMonth > 12) {
+      nextMonth = 1;
+      nextYear += 1;
+    }
+    const nextMonthStr = String(nextMonth).padStart(2, "0");
+    const nextPeriod = `${nextYear}-${nextMonthStr}`;
+
+    const actualNextStartDay = Math.min(cDay + 1, maxDaysCur);
+    const nextCycleStartDate = `${activeYearNum}-${activeMonthStr}-${String(actualNextStartDay).padStart(2, "0")}`;
+
+    const maxDaysNext = new Date(nextYear, nextMonth, 0).getDate();
+    const actualNextEndDay = Math.min(cDay, maxDaysNext);
+    const nextCycleEndDate = `${nextYear}-${nextMonthStr}-${String(actualNextEndDay).padStart(2, "0")}`;
+
+    const actualNextDueDay = Math.min(dDay, maxDaysNext);
+    const nextDueDateStr = `${nextYear}-${nextMonthStr}-${String(actualNextDueDay).padStart(2, "0")}`;
+    const nextCycleRangeStr = `${String(actualNextStartDay).padStart(2, "0")}/${activeMonthStr} até ${String(actualNextEndDay).padStart(2, "0")}/${nextMonthStr}`;
+
+    const monthNames = [
+      "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+      "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ];
+    const nextPeriodLabel = `${monthNames[nextMonth - 1]} de ${nextYear}`;
+
+    // Filtrar compras para cada fatura
+    const curTxs: Transaction[] = [];
+    const nextTxs: Transaction[] = [];
+
+    transactions.forEach(t => {
+      if (t.type !== "saida") return;
+      if (t.isCardInvoicePayment) return; // Pagamento de fatura nunca entra como compra!
       const isLinkedToCard = t.cardId === card.id || (t.paymentMethod === "cartao_credito" && (!t.cardId || t.cardId === card.id));
-      if (!isLinkedToCard) return false;
+      if (!isLinkedToCard) return;
 
-      // Check if transaction date is within this invoice cycle
-      return t.date >= startDateStr && t.date <= endDateStr;
+      // Se a transação já tem invoicePeriod explícito:
+      if (t.invoicePeriod) {
+        if (t.invoicePeriod === curPeriod) {
+          curTxs.push(t);
+        } else if (t.invoicePeriod === nextPeriod) {
+          nextTxs.push(t);
+        }
+        return;
+      }
+
+      // Legado: calcular pelo ciclo de datas da compra
+      const checkDate = t.purchaseDate || t.date;
+      if (checkDate >= curCycleStartDate && checkDate <= curCycleEndDate) {
+        curTxs.push(t);
+      } else if (checkDate >= nextCycleStartDate && checkDate <= nextCycleEndDate) {
+        nextTxs.push(t);
+      }
     });
 
-    const totalAmount = cardTxs.reduce((acc, t) => acc + t.amount, 0);
+    const curTotal = curTxs.reduce((acc, t) => acc + t.amount, 0);
+    const nextTotal = nextTxs.reduce((acc, t) => acc + t.amount, 0);
 
-    // Formatted cycle range
-    const cycleRangeStr = `${String(actualStartDay).padStart(2, "0")}/${String(prevMonth).padStart(2, "0")} até ${String(actualEndDay).padStart(2, "0")}/${activeMonthStr}`;
-
-    // Due date of invoice
-    const maxDaysDue = new Date(activeYearNum, activeMonthNum, 0).getDate();
-    const actualDueDay = Math.min(card.dueDay, maxDaysDue);
-    const dueDateStr = `${activeYearNum}-${activeMonthStr}-${String(actualDueDay).padStart(2, "0")}`;
-
-    // Check if an invoice transaction already exists for this card in this month
-    const isAlreadyPosted = transactions.some(t => 
+    // Verificar se já existe lançamento de pagamento no caixa para a fatura atual
+    const curPaidTx = transactions.find(t =>
       t.caixaId === activeCaixaId &&
       t.type === "saida" &&
-      t.description.toLowerCase().includes("fatura") &&
-      t.description.toLowerCase().includes(card.name.toLowerCase()) &&
-      t.date.startsWith(`${activeYearNum}-${activeMonthStr}`)
+      (t.isCardInvoicePayment || t.description.toLowerCase().includes("fatura")) &&
+      (t.cardId === card.id || t.description.toLowerCase().includes(card.name.toLowerCase())) &&
+      (t.invoicePeriod === curPeriod || t.description.includes(curPeriod) || t.date.startsWith(curPeriod))
+    );
+
+    // Verificar se já existe lançamento de pagamento no caixa para a próxima fatura
+    const nextPaidTx = transactions.find(t =>
+      t.caixaId === activeCaixaId &&
+      t.type === "saida" &&
+      (t.isCardInvoicePayment || t.description.toLowerCase().includes("fatura")) &&
+      (t.cardId === card.id || t.description.toLowerCase().includes(card.name.toLowerCase())) &&
+      (t.invoicePeriod === nextPeriod || t.description.includes(nextPeriod) || t.date.startsWith(nextPeriod))
     );
 
     return {
-      cardTxs,
-      totalAmount,
-      cycleRangeStr,
-      dueDateStr,
-      actualDueDay,
-      actualEndDay,
-      isAlreadyPosted
+      current: {
+        period: curPeriod,
+        periodLabel: currentMonthLabel,
+        cycleRangeStr: curCycleRangeStr,
+        dueDateStr: curDueDateStr,
+        actualDueDay,
+        txs: curTxs,
+        total: curTotal,
+        isPaid: !!curPaidTx,
+        paidTx: curPaidTx
+      },
+      next: {
+        period: nextPeriod,
+        periodLabel: nextPeriodLabel,
+        cycleRangeStr: nextCycleRangeStr,
+        dueDateStr: nextDueDateStr,
+        actualDueDay: actualNextDueDay,
+        txs: nextTxs,
+        total: nextTotal,
+        isPaid: !!nextPaidTx,
+        paidTx: nextPaidTx
+      }
     };
   };
 
   const activeCards = creditCards.filter(c => !c.caixaId || c.caixaId === activeCaixaId);
+
+  const handleOpenSettlingModal = (card: CreditCard, inv: any) => {
+    setSettlingModal({
+      card,
+      period: inv.period,
+      periodLabel: inv.periodLabel,
+      totalAmount: inv.total,
+      amountInput: inv.total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      paymentDate: new Date().toISOString().split("T")[0],
+      paymentMethod: "pix"
+    });
+  };
+
+  const handleConfirmSettling = () => {
+    if (!settlingModal) return;
+    const clean = settlingModal.amountInput.replace(/\./g, "").replace(",", ".");
+    const parsedAmount = parseFloat(clean);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      alert("Por favor, informe um valor válido para o pagamento da fatura.");
+      return;
+    }
+    if (!settlingModal.paymentDate) {
+      alert("Por favor, selecione a data do pagamento.");
+      return;
+    }
+
+    onPostInvoiceToLedger(
+      settlingModal.card,
+      parsedAmount,
+      settlingModal.paymentDate,
+      settlingModal.periodLabel,
+      settlingModal.paymentMethod,
+      settlingModal.period
+    );
+
+    setSettlingModal(null);
+  };
 
   return (
     <div className="space-y-6">
@@ -226,7 +360,7 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                 Cartões de Crédito & Faturas
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Competência de análise: <strong className="text-indigo-600">{currentMonthLabel}</strong>
+                Competência de referência: <strong className="text-indigo-600">{currentMonthLabel}</strong>
               </p>
             </div>
           </div>
@@ -250,7 +384,7 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
           </div>
           <h3 className="text-sm font-bold text-slate-700">Nenhum cartão de crédito cadastrado</h3>
           <p className="text-xs text-slate-400 max-w-md mt-1 mb-4 leading-relaxed">
-            Cadastre seus cartões de crédito informando o <strong>dia que o cartão vira (fechamento)</strong> e o <strong>dia de vencimento</strong>. As compras feitas no cartão serão agrupadas na fatura correta de forma 100% automática!
+            Cadastre seus cartões informando o <strong>dia de virada (fechamento)</strong> e o <strong>dia de vencimento</strong>. As compras feitas no cartão serão agrupadas na fatura correta de forma 100% automática!
           </p>
           <button
             type="button"
@@ -264,7 +398,9 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {activeCards.map(card => {
-            const invoice = getCardInvoiceTransactions(card);
+            const invoices = getCardInvoicesData(card);
+            const activeTab = cardInvoiceTab[card.id] || "current";
+            const currentInv = activeTab === "current" ? invoices.current : invoices.next;
             const colorPreset = PRESET_COLORS.find(p => p.hex.toLowerCase() === (card.color || "").toLowerCase()) || PRESET_COLORS[0];
             const isSelected = selectedCardId === card.id;
 
@@ -275,9 +411,8 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                   isSelected ? "ring-2 ring-indigo-600 border-indigo-500" : "border-slate-200/80"
                 }`}
               >
-                {/* Visual Card simulation banner */}
+                {/* Visual Card banner */}
                 <div className={`${colorPreset.bg} p-5 text-white relative overflow-hidden`}>
-                  {/* Background circles */}
                   <div className="absolute right-0 top-0 translate-x-8 -translate-y-8 w-32 h-32 rounded-full bg-white/10 blur-xl pointer-events-none" />
                   <div className="absolute right-10 bottom-0 translate-y-6 w-24 h-24 rounded-full bg-white/5 pointer-events-none" />
 
@@ -322,26 +457,87 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                   </div>
                 </div>
 
+                {/* Sub-selector: Fatura Atual vs Próxima Fatura */}
+                <div className="bg-slate-100/90 p-1.5 border-b border-slate-200/80 flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setCardInvoiceTab(prev => ({ ...prev, [card.id]: "current" }))}
+                    className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                      activeTab === "current"
+                        ? "bg-white text-indigo-700 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    <Calendar size={12} />
+                    <span>Fatura {activeMonthStr}/{String(activeYearNum).slice(2)}</span>
+                    {invoices.current.isPaid && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Quitada" />
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setCardInvoiceTab(prev => ({ ...prev, [card.id]: "next" }))}
+                    className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                      activeTab === "next"
+                        ? "bg-white text-purple-700 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    <Layers size={12} />
+                    <span>Próxima Fatura</span>
+                    {invoices.next.txs.length > 0 && (
+                      <span className="text-[9px] px-1 py-0.2 rounded-full bg-purple-100 text-purple-800 font-mono">
+                        {invoices.next.txs.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
                 {/* Invoice Body */}
                 <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
                   <div>
-                    <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-                      <span>Fatura do Mês ({currentMonthLabel}):</span>
-                      <span className="text-[10px] font-mono text-slate-400">Ciclo: {invoice.cycleRangeStr}</span>
-                    </div>
+                    {activeTab === "current" ? (
+                      <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                        <span className="font-semibold text-slate-700">Fatura de {currentInv.periodLabel}:</span>
+                        <span className="text-[10px] font-mono text-slate-400">Ciclo: {currentInv.cycleRangeStr}</span>
+                      </div>
+                    ) : (
+                      <div className="bg-purple-50/70 border border-purple-200/70 rounded-xl p-2.5 mb-2 text-xs text-purple-900">
+                        <div className="flex items-center justify-between font-bold text-[11px] mb-0.5">
+                          <span>Próxima Fatura ({currentInv.periodLabel})</span>
+                          <span className="text-[10px] font-mono text-purple-700">Ciclo: {currentInv.cycleRangeStr}</span>
+                        </div>
+                        <p className="text-[10px] text-purple-750 leading-tight">
+                          ⚡ Compras a partir do dia <strong>{card.closingDay + 1}</strong> entram nesta fatura com vencimento em <strong>{currentInv.dueDateStr.split("-").reverse().join("/")}</strong>.
+                        </p>
+                      </div>
+                    )}
 
                     <div className="flex items-baseline justify-between mt-1">
-                      <h4 className="text-2xl font-black font-mono text-slate-800">
-                        R$ {invoice.totalAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </h4>
-
-                      {invoice.isAlreadyPosted ? (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                          <CheckCircle2 size={11} /> Lançada no Caixa
+                      <div>
+                        <h4 className="text-2xl font-black font-mono text-slate-800">
+                          R$ {currentInv.total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </h4>
+                        <span className="text-[10px] text-slate-400 font-medium">
+                          {currentInv.txs.length} {currentInv.txs.length === 1 ? "compra lançada" : "compras lançadas"}
                         </span>
+                      </div>
+
+                      {currentInv.isPaid ? (
+                        <div className="text-right">
+                          <span className="inline-flex items-center gap-1 text-[10.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+                            <CheckCircle2 size={12} /> Fatura Paga no Caixa
+                          </span>
+                          {currentInv.paidTx && (
+                            <span className="block text-[9px] text-slate-400 font-mono mt-0.5">
+                              Pago em {currentInv.paidTx.date.split("-").reverse().join("/")} via {currentInv.paidTx.paymentMethod?.toUpperCase()}
+                            </span>
+                          )}
+                        </div>
                       ) : (
-                        <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
-                          Em Aberto
+                        <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                          <Clock size={11} /> Em Aberto
                         </span>
                       )}
                     </div>
@@ -350,14 +546,14 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                       <div className="mt-3 text-[11px] text-slate-500">
                         <div className="flex justify-between text-[10px] font-medium mb-1">
                           <span>Limite: R$ {card.limit.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
-                          <span>Disponível: R$ {Math.max(0, card.limit - invoice.totalAmount).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+                          <span>Disponível: R$ {Math.max(0, card.limit - currentInv.total).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                           <div
                             className={`h-full rounded-full ${
-                              (invoice.totalAmount / card.limit) > 0.85 ? "bg-rose-500" : "bg-indigo-600"
+                              (currentInv.total / card.limit) > 0.85 ? "bg-rose-500" : "bg-indigo-600"
                             }`}
-                            style={{ width: `${Math.min(100, (invoice.totalAmount / card.limit) * 100)}%` }}
+                            style={{ width: `${Math.min(100, (currentInv.total / card.limit) * 100)}%` }}
                           />
                         </div>
                       </div>
@@ -376,18 +572,18 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                       }`}
                     >
                       <Receipt size={14} />
-                      <span>{isSelected ? "Ocultar Detalhes da Fatura" : `Ver ${invoice.cardTxs.length} Compras da Fatura`}</span>
+                      <span>{isSelected ? "Ocultar Detalhes da Fatura" : `Ver ${currentInv.txs.length} Compras desta Fatura`}</span>
                     </button>
 
-                    {invoice.totalAmount > 0 && !invoice.isAlreadyPosted && (
+                    {currentInv.total > 0 && !currentInv.isPaid && (
                       <button
                         type="button"
-                        onClick={() => onPostInvoiceToLedger(card, invoice.totalAmount, invoice.dueDateStr, currentMonthLabel)}
+                        onClick={() => handleOpenSettlingModal(card, currentInv)}
                         className="w-full py-2 px-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
-                        title="Lançar valor da fatura como despesa do mês no extrato"
+                        title="Registrar pagamento desta fatura e debitar saída do caixa"
                       >
                         <CheckCircle2 size={14} />
-                        <span>Lançar Fatura no Caixa (Dia {invoice.actualDueDay})</span>
+                        <span>Dar Baixa e Lançar no Caixa (R$ {currentInv.total.toLocaleString("pt-BR", { minimumFractionDigits: 2 })})</span>
                       </button>
                     )}
                   </div>
@@ -398,20 +594,20 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                   <div className="p-4 bg-slate-50 border-t border-slate-200/80 text-xs">
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-bold text-slate-700 uppercase text-[10px] tracking-wider">
-                        Compras vinculadas a esta fatura:
+                        Compras vinculadas a esta fatura ({currentInv.periodLabel}):
                       </span>
                       <span className="text-[10px] font-bold text-slate-500">
-                        {invoice.cardTxs.length} lançamento(s)
+                        {currentInv.txs.length} lançamento(s)
                       </span>
                     </div>
 
-                    {invoice.cardTxs.length === 0 ? (
+                    {currentInv.txs.length === 0 ? (
                       <p className="text-slate-400 italic py-2 text-center text-[11px]">
-                        Nenhuma compra registrada para este cartão no ciclo de fechamento de {currentMonthLabel}.
+                        Nenhuma compra registrada para este cartão neste ciclo de fechamento.
                       </p>
                     ) : (
                       <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                        {invoice.cardTxs.map(tx => (
+                        {currentInv.txs.map(tx => (
                           <div
                             key={tx.id}
                             className="bg-white p-2 rounded-lg border border-slate-200/60 flex items-center justify-between shadow-3xs"
@@ -419,7 +615,8 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                             <div className="min-w-0 pr-2">
                               <span className="font-semibold text-slate-800 block truncate">{tx.description}</span>
                               <span className="text-[10px] text-slate-400 block font-mono">
-                                Data da compra: {tx.date.split("-").reverse().join("/")} • {tx.category}
+                                Data da compra: {(tx.purchaseDate || tx.date).split("-").reverse().join("/")} • {tx.category}
+                                {tx.installments && ` (Parcela ${tx.installments.current}/${tx.installments.total})`}
                               </span>
                             </div>
                             <span className="font-bold font-mono text-rose-600 whitespace-nowrap">
@@ -437,12 +634,141 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
         </div>
       )}
 
+      {/* MODAL: Baixa / Pagamento da Fatura no Caixa */}
+      {settlingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden my-auto max-h-[92vh] flex flex-col">
+            {/* Header Fixo */}
+            <div className="p-5 bg-gradient-to-r from-emerald-800 to-teal-900 text-white flex justify-between items-center flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-white/10 rounded-xl">
+                  <CheckCircle2 size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base">
+                    Quitar Fatura no Caixa
+                  </h3>
+                  <p className="text-[11px] text-emerald-200">
+                    Cartão: {settlingModal.card.name} • {settlingModal.periodLabel}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettlingModal(null)}
+                className="p-1 text-emerald-200 hover:text-white rounded-lg hover:bg-white/10 transition cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Body Rolável */}
+            <div className="p-5 overflow-y-auto flex-1 space-y-4 text-xs">
+              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Cartão:</span>
+                  <span className="font-bold text-slate-800">{settlingModal.card.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Fatura Referência:</span>
+                  <span className="font-bold text-slate-800">{settlingModal.periodLabel}</span>
+                </div>
+                <div className="flex justify-between border-t border-emerald-200/60 pt-1 mt-1 font-semibold">
+                  <span className="text-emerald-900 font-bold">Valor Total Calculado:</span>
+                  <span className="text-emerald-700 font-mono font-black text-sm">
+                    R$ {settlingModal.totalAmount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Valor Efetivamente Pago */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Valor Pago da Fatura (R$):
+                </label>
+                <input
+                  type="text"
+                  value={settlingModal.amountInput}
+                  onChange={e => setSettlingModal({ ...settlingModal, amountInput: e.target.value })}
+                  className="w-full text-sm font-bold font-mono px-3.5 py-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 bg-white"
+                  placeholder="0,00"
+                  required
+                />
+                <span className="text-[10px] text-slate-400 block mt-1">
+                  Este valor será debitado do caixa como pagamento da fatura consolidada.
+                </span>
+              </div>
+
+              {/* Data do Pagamento */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Data em que a Fatura foi Paga:
+                </label>
+                <input
+                  type="date"
+                  value={settlingModal.paymentDate}
+                  onChange={e => setSettlingModal({ ...settlingModal, paymentDate: e.target.value })}
+                  className="w-full text-xs font-mono font-bold px-3.5 py-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 bg-white"
+                  required
+                />
+              </div>
+
+              {/* Forma de Pagamento da Fatura */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Forma de Pagamento Utilizada para Pagar a Fatura:
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: "pix", label: "PIX", icon: "⚡" },
+                    { id: "dinheiro", label: "Dinheiro", icon: "💵" },
+                    { id: "cartao_debito", label: "Débito em Conta", icon: "💳" },
+                  ].map(method => (
+                    <button
+                      key={method.id}
+                      type="button"
+                      onClick={() => setSettlingModal({ ...settlingModal, paymentMethod: method.id as PaymentMethod })}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer border ${
+                        settlingModal.paymentMethod === method.id
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
+                          : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      <span>{method.icon}</span>
+                      <span>{method.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Fixo */}
+            <div className="p-4 bg-slate-50 border-t border-slate-150 flex items-center justify-end gap-2.5 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setSettlingModal(null)}
+                className="flex-1 py-2.5 text-xs font-bold text-slate-650 bg-white border border-slate-250 hover:bg-slate-100 rounded-xl transition cursor-pointer text-center"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSettling}
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition shadow-xs cursor-pointer text-center"
+              >
+                Confirmar e Lançar no Caixa
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: Cadastrar / Editar Cartão */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden">
-            {/* Header */}
-            <div className="p-5 bg-gradient-to-r from-indigo-900 to-slate-900 text-white flex justify-between items-center">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden my-auto max-h-[92vh] flex flex-col">
+            {/* Header Fixo */}
+            <div className="p-5 bg-gradient-to-r from-indigo-900 to-slate-900 text-white flex justify-between items-center flex-shrink-0">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 bg-white/10 rounded-xl">
                   <CreditCardIcon size={20} />
@@ -465,8 +791,8 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
               </button>
             </div>
 
-            {/* Form */}
-            <form onSubmit={handleSave} className="p-6 space-y-4">
+            {/* Form Rolável */}
+            <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-6 space-y-4">
               {/* Nome do Cartão */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -494,14 +820,14 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                       min={1}
                       max={31}
                       value={formClosingDay}
-                      onChange={e => setFormClosingDay(parseInt(e.target.value) || 1)}
+                      onChange={e => setFormClosingDay(parseInt(e.target.value, 10) || 1)}
                       className="w-full text-xs font-bold font-mono px-3.5 py-2.5 border border-slate-200 rounded-xl outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                       required
                     />
                     <span className="absolute right-3 top-2.5 text-xs text-slate-400 font-medium">dia</span>
                   </div>
                   <span className="text-[10px] text-slate-400 block mt-1">
-                    Compras a partir deste dia caem no próximo mês.
+                    Compras após este dia caem no próximo mês.
                   </span>
                 </div>
 
@@ -515,7 +841,7 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                       min={1}
                       max={31}
                       value={formDueDay}
-                      onChange={e => setFormDueDay(parseInt(e.target.value) || 1)}
+                      onChange={e => setFormDueDay(parseInt(e.target.value, 10) || 1)}
                       className="w-full text-xs font-bold font-mono px-3.5 py-2.5 border border-slate-200 rounded-xl outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                       required
                     />
@@ -570,7 +896,7 @@ export const CreditCardsManager: React.FC<CreditCardsManagerProps> = ({
                 </div>
               </div>
 
-              {/* Buttons */}
+              {/* Buttons Footer */}
               <div className="pt-4 border-t border-slate-100 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
