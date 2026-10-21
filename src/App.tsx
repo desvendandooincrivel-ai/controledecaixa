@@ -3649,14 +3649,14 @@ export default function App() {
       : 0;
 
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
         {/* Backdrop */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onClick={resetReceiptConfirmation}
-          className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs"
         />
 
         {/* Modal Content */}
@@ -3664,29 +3664,33 @@ export default function App() {
           initial={{ opacity: 0, scale: 0.95, y: 15 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95, y: 15 }}
-          className="bg-white rounded-3xl border border-slate-100 shadow-2xl w-full max-w-md relative z-10 p-6 flex flex-col"
+          className="bg-white rounded-3xl border border-slate-100 shadow-2xl w-full max-w-md max-h-[92vh] relative z-10 flex flex-col my-auto overflow-hidden"
         >
-          {/* Close */}
-          <button
-            type="button"
-            onClick={resetReceiptConfirmation}
-            className="absolute right-4 top-4 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition"
-          >
-            <X size={15} />
-          </button>
+          {/* Header Fixo */}
+          <div className="p-5 pb-3 border-b border-slate-100 flex-shrink-0 relative bg-white">
+            {/* Close */}
+            <button
+              type="button"
+              onClick={resetReceiptConfirmation}
+              className="absolute right-4 top-4 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+            >
+              <X size={15} />
+            </button>
 
-          <div className="flex items-center gap-2 mb-3">
-            <span className="p-1.5 bg-emerald-50 text-emerald-750 rounded-lg">
-              <Check size={16} />
-            </span>
-            <h3 className="font-bold text-sm text-slate-800">Confirmar Recebimento de Aluguel</h3>
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="p-1.5 bg-emerald-50 text-emerald-750 rounded-lg">
+                <Check size={16} />
+              </span>
+              <h3 className="font-bold text-sm text-slate-800">Confirmar Recebimento de Aluguel</h3>
+            </div>
+
+            <p className="text-xs text-slate-500 leading-normal">
+              Registre os detalhes de quitação do aluguel do imóvel <strong>{rental.lfCode}</strong> ({rental.tenantName}) para o relatório de auditoria e prestação de contas.
+            </p>
           </div>
 
-          <p className="text-xs text-slate-500 mb-4 leading-normal">
-            Registre os detalhes de quitação do aluguel do imóvel <strong>{rental.lfCode}</strong> ({rental.tenantName}) para o relatório de auditoria e prestação de contas.
-          </p>
-
-          <div className="space-y-4 text-xs">
+          {/* Body Rolável */}
+          <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs">
             {/* Info Box */}
             <div className="bg-slate-50 border border-slate-150 p-3 rounded-xl space-y-1 bg-gradient-to-r from-slate-50 to-indigo-50/20">
               <div className="flex justify-between">
@@ -3984,44 +3988,44 @@ export default function App() {
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Save / Cancel buttons */}
-            <div className="flex gap-2 pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={resetReceiptConfirmation}
-                className="flex-1 py-2 bg-slate-100 text-slate-650 hover:bg-slate-200/80 font-bold rounded-xl transition cursor-pointer text-center"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!receiptDateInput) return;
-                  const splitPartObj = receiptHasSplitPart && amountDifference > 0 ? {
-                    amount: parseCurrencyInput(receiptSplitAmountInput) || amountDifference,
-                    date: receiptSplitDateInput || receiptDateInput,
-                    paymentMethod: receiptSplitPaymentMethod,
-                    observation: receiptSplitObservation
-                  } : undefined;
+          {/* Footer Fixo com Botões Sempre Visíveis */}
+          <div className="p-4 bg-slate-50/90 border-t border-slate-150 flex gap-2.5 flex-shrink-0">
+            <button
+              type="button"
+              onClick={resetReceiptConfirmation}
+              className="flex-1 py-2.5 bg-white border border-slate-200 text-slate-650 hover:bg-slate-100 font-bold rounded-xl transition cursor-pointer text-center text-xs shadow-3xs"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!receiptDateInput) return;
+                const splitPartObj = receiptHasSplitPart && amountDifference > 0 ? {
+                  amount: parseCurrencyInput(receiptSplitAmountInput) || amountDifference,
+                  date: receiptSplitDateInput || receiptDateInput,
+                  paymentMethod: receiptSplitPaymentMethod,
+                  observation: receiptSplitObservation
+                } : undefined;
 
-                  handleConfirmRentalPaidWithDetails(
-                    rental,
-                    period,
-                    receiptDateInput,
-                    receivedAmount,
-                    receiptShortfallTreatment,
-                    receiptLateFeeTreatment,
-                    receiptPaymentMethod,
-                    receiptObservation,
-                    splitPartObj
-                  );
-                }}
-                className="flex-1 py-2 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs"
-              >
-                Confirmar Recebimento
-              </button>
-            </div>
+                handleConfirmRentalPaidWithDetails(
+                  rental,
+                  period,
+                  receiptDateInput,
+                  receivedAmount,
+                  receiptShortfallTreatment,
+                  receiptLateFeeTreatment,
+                  receiptPaymentMethod,
+                  receiptObservation,
+                  splitPartObj
+                );
+              }}
+              className="flex-1 py-2.5 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs text-xs"
+            >
+              Confirmar Recebimento
+            </button>
           </div>
         </motion.div>
       </div>
@@ -9255,41 +9259,45 @@ export default function App() {
       {/* OVERLAY MODAL: Quitar 2ª Parte do Aluguel (Saldo Devedor) */}
       <AnimatePresence>
         {payingShortfallRental && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setPayingShortfallRental(null)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
+              className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs"
             />
 
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="bg-white rounded-3xl border border-slate-100 shadow-2xl w-full max-w-md relative z-10 p-6 flex flex-col"
+              className="bg-white rounded-3xl border border-slate-100 shadow-2xl w-full max-w-md max-h-[92vh] relative z-10 flex flex-col my-auto overflow-hidden"
             >
-              <button
-                type="button"
-                onClick={() => setPayingShortfallRental(null)}
-                className="absolute right-4 top-4 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition cursor-pointer"
-              >
-                <X size={15} />
-              </button>
+              {/* Header Fixo */}
+              <div className="p-5 pb-3 border-b border-slate-100 flex-shrink-0 relative bg-white">
+                <button
+                  type="button"
+                  onClick={() => setPayingShortfallRental(null)}
+                  className="absolute right-4 top-4 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+                >
+                  <X size={15} />
+                </button>
 
-              <div className="flex items-center gap-2 mb-2">
-                <span className="p-1.5 bg-emerald-50 text-emerald-700 rounded-lg">
-                  <Check size={16} />
-                </span>
-                <h3 className="font-bold text-sm text-slate-800">Quitar 2ª Parte do Aluguel</h3>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="p-1.5 bg-emerald-50 text-emerald-700 rounded-lg">
+                    <Check size={16} />
+                  </span>
+                  <h3 className="font-bold text-sm text-slate-800">Quitar 2ª Parte do Aluguel</h3>
+                </div>
+
+                <p className="text-xs text-slate-500 leading-normal">
+                  Registre a data e a forma de pagamento do saldo devedor restante do imóvel <strong>{payingShortfallRental.lfCode}</strong> ({payingShortfallRental.tenantName}).
+                </p>
               </div>
 
-              <p className="text-xs text-slate-500 mb-4 leading-normal">
-                Registre a data e a forma de pagamento do saldo devedor restante do imóvel <strong>{payingShortfallRental.lfCode}</strong> ({payingShortfallRental.tenantName}).
-              </p>
-
-              <div className="space-y-3.5 text-xs">
+              {/* Body Rolável */}
+              <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs">
                 {/* Resumo do Contrato e 1ª Parte */}
                 <div className="bg-slate-50 border border-slate-150 p-3 rounded-xl space-y-1 bg-gradient-to-r from-slate-50 to-emerald-50/30">
                   <div className="flex justify-between">
@@ -9371,34 +9379,34 @@ export default function App() {
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500/30 focus:border-emerald-500 text-xs text-slate-800"
                   />
                 </div>
+              </div>
 
-                {/* Botões Salvar / Cancelar */}
-                <div className="flex gap-2 pt-2 border-t border-slate-100">
-                  <button
-                    type="button"
-                    onClick={() => setPayingShortfallRental(null)}
-                    className="flex-1 py-2 bg-slate-100 text-slate-650 hover:bg-slate-200/80 font-bold rounded-xl transition cursor-pointer text-center"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const amount = parseCurrencyInput(payingShortfallAmountInput);
-                      handleConfirmRentalShortfallPayment(
-                        payingShortfallRental,
-                        payingShortfallPeriod,
-                        payingShortfallDateInput,
-                        amount,
-                        payingShortfallPaymentMethod,
-                        payingShortfallObservation
-                      );
-                    }}
-                    className="flex-1 py-2 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs"
-                  >
-                    Confirmar Quitação
-                  </button>
-                </div>
+              {/* Footer Fixo com Botões Sempre Visíveis */}
+              <div className="p-4 bg-slate-50/90 border-t border-slate-150 flex gap-2.5 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setPayingShortfallRental(null)}
+                  className="flex-1 py-2.5 bg-white border border-slate-200 text-slate-650 hover:bg-slate-100 font-bold rounded-xl transition cursor-pointer text-center text-xs shadow-3xs"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const amount = parseCurrencyInput(payingShortfallAmountInput);
+                    handleConfirmRentalShortfallPayment(
+                      payingShortfallRental,
+                      payingShortfallPeriod,
+                      payingShortfallDateInput,
+                      amount,
+                      payingShortfallPaymentMethod,
+                      payingShortfallObservation
+                    );
+                  }}
+                  className="flex-1 py-2.5 bg-emerald-600 text-white hover:bg-emerald-700 font-bold rounded-xl transition cursor-pointer text-center shadow-xs text-xs"
+                >
+                  Confirmar Quitação
+                </button>
               </div>
             </motion.div>
           </div>
@@ -9408,9 +9416,9 @@ export default function App() {
       {/* CONFIRMAÇÃO E AJUSTE DE VALOR/PAGAMENTO DE DESPESA/RECEITA FIXA */}
       <AnimatePresence>
         {confirmingFixedTpl && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-slate-900 dark:text-slate-100 relative">
-              <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn overflow-y-auto">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full relative max-h-[92vh] flex flex-col my-auto overflow-hidden">
+              <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-2">
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm ${
                     confirmingFixedTpl.type === "entrada" 
@@ -9431,13 +9439,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setConfirmingFixedTpl(null)}
-                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
                 >
                   ✕
                 </button>
               </div>
 
-              <div className="space-y-4 text-sm">
+              <div className="p-5 overflow-y-auto flex-1 space-y-4 text-sm">
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
                     Descrição do Lançamento
@@ -9565,18 +9573,18 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 mt-6 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <div className="p-4 px-5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-3 flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => setConfirmingFixedTpl(null)}
-                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition"
+                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="button"
                   onClick={handleConfirmLaunchFixed}
-                  className="px-5 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 rounded-xl shadow-md shadow-emerald-600/20 transition flex items-center gap-1.5"
+                  className="px-5 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 rounded-xl shadow-md shadow-emerald-600/20 transition flex items-center gap-1.5 cursor-pointer"
                 >
                   <span>✓</span>
                   <span>Confirmar e Lançar</span>
@@ -9590,9 +9598,9 @@ export default function App() {
       {/* MODAL DE EDIÇÃO DO MODELO FIXO CADASTRADO E LANÇAMENTO NO MÊS */}
       <AnimatePresence>
         {editingFixedTpl && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-slate-900 dark:text-slate-100 relative">
-              <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn overflow-y-auto">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl max-w-md w-full relative max-h-[92vh] flex flex-col my-auto overflow-hidden">
+              <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-2">
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm ${
                     editingFixedTpl.type === "entrada"
@@ -9613,13 +9621,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setEditingFixedTpl(null)}
-                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
                 >
                   ✕
                 </button>
               </div>
 
-              <div className="space-y-4 text-sm">
+              <div className="p-5 overflow-y-auto flex-1 space-y-4 text-sm">
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
                     Descrição da Recorrência
@@ -9718,18 +9726,18 @@ export default function App() {
                 })()}
               </div>
 
-              <div className="flex items-center justify-end gap-3 mt-6 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <div className="p-4 px-5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-3 flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => setEditingFixedTpl(null)}
-                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition"
+                  className="px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="button"
                   onClick={handleSaveEditFixed}
-                  className="px-5 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-xl shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5"
+                  className="px-5 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-xl shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5 cursor-pointer"
                 >
                   <Check size={14} />
                   <span>Salvar Alterações</span>

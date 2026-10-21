@@ -83,8 +83,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
-    minWidth: 1080,
-    minHeight: 720,
+    minWidth: 900,
+    minHeight: 580,
     backgroundColor: "#f8fafc",
     title: "Controle de Caixa",
     show: false,
@@ -92,6 +92,22 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
+    }
+  });
+
+  // Atalhos de Zoom no app desktop (Ctrl +, Ctrl -, Ctrl 0)
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.control || input.meta) {
+      if (input.key === "=" || input.key === "+") {
+        mainWindow.webContents.zoomLevel = Math.min(mainWindow.webContents.zoomLevel + 0.5, 3.0);
+        event.preventDefault();
+      } else if (input.key === "-") {
+        mainWindow.webContents.zoomLevel = Math.max(mainWindow.webContents.zoomLevel - 0.5, -2.5);
+        event.preventDefault();
+      } else if (input.key === "0") {
+        mainWindow.webContents.zoomLevel = 0;
+        event.preventDefault();
+      }
     }
   });
 
