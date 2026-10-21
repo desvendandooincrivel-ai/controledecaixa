@@ -398,7 +398,7 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
       const simulate = req.query.simulate === "true";
       
       // Read current local package version
-      let currentVersion = process.env.APP_VERSION || "1.0.9";
+      let currentVersion = process.env.APP_VERSION || "1.0.10";
       try {
         const candidatePaths = [
           path.join(process.cwd(), "package.json"),
@@ -422,12 +422,12 @@ ${transactionsContext || "(Nenhuma transação registrada neste período)"}
         res.json({
           hasUpdate: true,
           currentVersion,
-          latestVersion: "1.0.9",
-          releaseName: "Versão 1.0.9 - Atualização de Recursos & Notificações",
+          latestVersion: "1.0.10",
+          releaseName: "Versão 1.0.10 - Ciclo de Cartão de Crédito e Ajustes de Layout",
           releaseNotes: "### 🚀 O que mudou na Versão 1.0.9:\n- **Melhorias de Estabilidade**: Otimização no verificador de atualizações e leitura precisa da versão.\n- **Interface Aprimorada**: Ajustes visuais nos relatórios e conciliação financeira.\n- **Correções Gerais**: Correções no fluxo de caixa e exportação.",
           publishedAt: new Date().toISOString(),
           downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
-          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.9.exe",
+          installerUrl: "https://github.com/desvendandooincrivel-ai/caixaatt/raw/main/Controle-de-Caixa-Setup-1.0.10.exe",
           installerSize: 115000000,
           isSimulated: true,
           checkedAt: new Date().toISOString()

@@ -759,9 +759,9 @@ export default function App() {
       if (manual) {
         setUpdateInfo({
           hasUpdate: false,
-          currentVersion: "1.0.9",
-          latestVersion: "1.0.9",
-          releaseName: "Versão 1.0.9",
+          currentVersion: "1.0.10",
+          latestVersion: "1.0.10",
+          releaseName: "Versão 1.0.10",
           releaseNotes: "Não foi possível conectar ao servidor de atualizações do GitHub no momento. Verifique sua conexão com a internet.",
           publishedAt: new Date().toISOString(),
           downloadUrl: "https://github.com/desvendandooincrivel-ai/caixaatt",
@@ -847,7 +847,7 @@ export default function App() {
             const instIdx = t.installments ? (t.installments.current - 1) : 0;
             const cycle = getCreditCardCycleForPurchase(purchaseDate, closingDay, dueDay, instIdx);
 
-            if (!t.invoicePeriod || !t.purchaseDate || (t.date !== cycle.dueDate && t.date === purchaseDate && cycle.isNextMonth)) {
+            if (!t.invoicePeriod || !t.purchaseDate || (t.date !== cycle.dueDate && t.date === purchaseDate && cycle.isRolledToNextMonth)) {
               changed = true;
               return {
                 ...t,
@@ -4718,7 +4718,7 @@ export default function App() {
             ) : (
               <>
                 <RefreshCw size={9} className={isCheckingUpdate ? "animate-spin text-indigo-300" : "text-slate-400"} />
-                <span>v{updateInfo?.currentVersion || "1.0.9"}</span>
+                <span>v{updateInfo?.currentVersion || "1.0.10"}</span>
               </>
             )}
           </button>
